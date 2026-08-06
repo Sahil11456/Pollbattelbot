@@ -1,6 +1,5 @@
-python-telegram-bot>=22.0.0
+python-telegram-bot>=22.0b0
 aiosqlite>=0.20.0
-pydantic>=2.7.0
 python-dotenv>=1.0.1
-aiohttp>=3.9.5
-apscheduler>=3.10.4
+matplotlib>=3.8.3
+cryptography>=42.0.5
