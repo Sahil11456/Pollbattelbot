@@ -1,33 +1,33 @@
 import os
-from pathlib import Path
+import logging
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv()
 
+# Logging Configuration
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger("PollBattleBot")
+
+# Telegram Bot Credentials
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8871940323:AAHlQU6eytIp3-KVaMWQhYes6T5dMEo6u5E")
-DB_PATH = os.getenv("DB_PATH", "bot_data.db")
-DB_URL = str(BASE_DIR / DB_PATH)
+BOT_NAME = os.getenv("BOT_NAME", "PollManagerBot")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "PollManager1_Bot")
 
-ADMIN_IDS = [
-    int(x.strip()) for x in os.getenv("ADMIN_IDS", "5636959648").split(",") if x.strip().isdigit()
-]
+# Admin IDs (comma-separated integer IDs)
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "5636959648")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 
-LOGS_DIR = BASE_DIR / "logs"
-BACKUPS_DIR = BASE_DIR / "backups"
-ASSETS_DIR = BASE_DIR / "assets"
+# Database File Path
+DB_PATH = os.getenv("DB_PATH", "database.db")
 
-LOGS_DIR.mkdir(exist_ok=True)
-BACKUPS_DIR.mkdir(exist_ok=True)
-ASSETS_DIR.mkdir(exist_ok=True)
+# Default Poll Settings
+MAX_POLL_OPTIONS = 10
+MIN_POLL_OPTIONS = 2
+DEFAULT_RATE_LIMIT = 5  # Max commands per 10 seconds
+MAX_ANONYMOUS_NAME = "Anonymous Voter"
 
-# Gamification Metrics
-XP_PER_VOTE = 10
-XP_PER_POLL_CREATION = 20
-XP_LEVEL_UP_BASE = 100
-
-DEFAULT_REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@PollArena")
-DEFAULT_FORCE_JOIN_ENABLED = os.getenv("FORCE_JOIN_ENABLED", "True").lower() == "true"
-
-RATE_LIMIT_SECONDS = 0.6
-SPAM_BLOCK_DURATION = 3
+# Maintenance Mode
+MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "false").lower() == "true"
