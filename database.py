@@ -1,123 +1,90 @@
 import aiosqlite
 import logging
-from config import config
+from config import DB_URL
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.database")
 
-async def get_db():
-    conn = await aiosqlite.connect(config.DATABASE_PATH)
-    conn.row_factory = aiosqlite.Row
+async def get_db_connection() -> aiosqlite.Connection:
+    conn = await aiosqlite.connect(DB_URL)
     await conn.execute("PRAGMA foreign_keys = ON;")
+    await conn.execute("PRAGMA journal_mode = WAL;")
+    await conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 async def init_db():
-    async with await get_db() as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                points INTEGER DEFAULT 0,
-                votes_cast INTEGER DEFAULT 0,
-                polls_created INTEGER DEFAULT 0,
-                wins_count INTEGER DEFAULT 0,
-                is_admin INTEGER DEFAULT 0,
-                is_banned INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+    async with await get_db_connection() as conn:
+        # 1. Users
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            role TEXT DEFAULT 'user',
+            xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            rank TEXT DEFAULT 'Beginner',
+            is_joined_channel INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            registration_date TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS polls (
-                poll_id TEXT PRIMARY KEY,
-                creator_id INTEGER NOT NULL,
-                creator_name TEXT NOT NULL,
-                title TEXT NOT NULL,
-                poll_type TEXT NOT NULL DEFAULT 'public',
-                choice_mode TEXT NOT NULL DEFAULT 'single',
-                is_closed INTEGER DEFAULT 0,
-                is_featured INTEGER DEFAULT 0,
-                correct_option_id TEXT,
-                hot_score INTEGER DEFAULT 0,
-                shares_count INTEGER DEFAULT 0,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (creator_id) REFERENCES users(user_id) ON DELETE CASCADE
-            );
+        # 2. Polls Table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS polls (
+            poll_id TEXT PRIMARY KEY,
+            creator_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            options_json TEXT NOT NULL,
+            status TEXT DEFAULT 'active',
+            views INTEGER DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            is_featured INTEGER DEFAULT 0,
+            duration_seconds INTEGER DEFAULT 86400,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (creator_id) REFERENCES users (user_id) ON DELETE CASCADE
+        );
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS options (
-                option_id TEXT PRIMARY KEY,
-                poll_id TEXT NOT NULL,
-                option_text TEXT NOT NULL,
-                option_order INTEGER NOT NULL,
-                votes INTEGER DEFAULT 0,
-                FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE
-            );
+        # 3. Votes (Composite Unique Lock)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS votes (
+            poll_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            option_index INTEGER NOT NULL,
+            voted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (poll_id, user_id),
+            FOREIGN KEY (poll_id) REFERENCES polls (poll_id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+        );
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS votes (
-                vote_id TEXT PRIMARY KEY,
-                poll_id TEXT NOT NULL,
-                option_id TEXT NOT NULL,
-                user_id INTEGER NOT NULL,
-                voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE,
-                FOREIGN KEY (option_id) REFERENCES options(option_id) ON DELETE CASCADE,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                UNIQUE(poll_id, option_id, user_id)
-            );
+        # 4. Settings
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS favorites (
-                user_id INTEGER NOT NULL,
-                poll_id TEXT NOT NULL,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, poll_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE
-            );
-        """)
+        # Indexing for hyper-fast search query and analytics rendering
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_creator ON polls(creator_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_status ON polls(status);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_user ON votes(user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_poll_user ON votes(poll_id, user_id);")
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS poll_channels (
-                channel_id INTEGER PRIMARY KEY,
-                channel_title TEXT NOT NULL,
-                added_by INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS force_join_channels (
-                channel_id TEXT PRIMARY KEY,
-                channel_url TEXT NOT NULL,
-                channel_title TEXT NOT NULL
-            );
-        """)
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS achievements (
-                achievement_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL,
-                badge TEXT NOT NULL,
-                unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            );
-        """)
-
-        # Performance Indexes
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_polls_creator ON polls(creator_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_polls_hot ON polls(hot_score DESC);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_options_poll ON options(poll_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_votes_user ON votes(user_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_votes_poll ON votes(poll_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC);")
-
-        await db.commit()
-        logger.info("SQLite Database initialized with full indexes and constraints successfully.")
+        # Seeding Default settings
+        default_settings = [
+            ('maintenance_mode', 'False'),
+            ('custom_footer', 'Powered by My Poll Battle Bot'),
+            ('auto_post_polls', 'True'),
+            ('device_verification', 'True'),
+            ('winner_announcements', 'True')
+        ]
+        for key, val in default_settings:
+            await conn.execute("INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?);", (key, val))
+            
+        await conn.commit()
