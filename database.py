@@ -111,24 +111,7 @@ async def init_db():
             );
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-        """)
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS winner_history (
-                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                poll_id TEXT NOT NULL,
-                winner_option_id TEXT NOT NULL,
-                winning_votes INTEGER NOT NULL,
-                announced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Indexes for Performance Optimization
+        # Performance Indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_polls_creator ON polls(creator_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_polls_hot ON polls(hot_score DESC);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_options_poll ON options(poll_id);")
