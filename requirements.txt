@@ -1,0 +1,6 @@
+python-telegram-bot[job-queue]>=22.0.0
+aiosqlite>=0.20.0
+python-dotenv>=1.0.1
+matplotlib>=3.8.3
+pillow>=10.2.0
+cryptography>=42.0.5
