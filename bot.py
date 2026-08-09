@@ -67,7 +67,6 @@ async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if text == "🌍 Active Polls":
-        # Handled by listing featured/all active polls or searching
         from handlers.search import start_search_handler
         await start_search_handler(update, context)
     elif text == "🔥 Trending Polls":
@@ -89,7 +88,6 @@ async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "❓ Help":
         await help_handler(update, context)
     else:
-        # Check if they are responding to any admin broadcast flows or searches
         bc_type = context.user_data.get('bc_type')
         if bc_type == 'text':
             from handlers.admin import bc_msg_received
@@ -102,7 +100,6 @@ async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await search_query_received(update, context)
             return
 
-        # Default help
         await update.message.reply_text("💡 Button command not recognized. Use the persistent menu buttons or `/help` guide.")
 
 async def main():
@@ -112,9 +109,9 @@ async def main():
 
     # Validate bot token
     if not BOT_TOKEN or BOT_TOKEN == "MOCK_TOKEN_FOR_SETUP":
-        logger.critical("BOT_TOKEN is missing or set to placeholder value! Please supply a valid Telegram bot token inside .env file.")
-        print("\n🛑 CRITICAL ERROR: BOT_TOKEN is missing inside '.env'. Please configure it to start the bot.")
-        return
+        logger.critical("BOT_TOKEN is missing or set to placeholder value! Please supply a valid Telegram bot token inside Railway Environment Variables.")
+        print("\n🛑 CRITICAL ERROR: BOT_TOKEN is missing! Please set BOT_TOKEN in Railway Variables tab.")
+        sys.exit(1)
 
     logger.info("Starting Telegram Bot Application context builder...")
     # Initialize application
@@ -152,11 +149,15 @@ async def main():
     # 6. Global System Exception interceptor
     app.add_error_handler(error_handler_middleware)
 
+    # Clear old webhooks and pending updates to enable long-polling
+    logger.info("Clearing webhooks and pending updates...")
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
     logger.info("Poll Battle Bot is ONLINE and listening for events!")
     # Start bot polling loop
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     
     # Run loop until terminated
     try:
