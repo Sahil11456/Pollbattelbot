@@ -1,78 +1,131 @@
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
-
-from config import ADMIN_IDS
 import database
 from utils.keyboards import get_poll_inline_keyboard
-from utils.progressbar import generate_poll_results_text
-from utils.helpers import calculate_rank
+from utils.progressbar import generate_progress_bar
 
 logger = logging.getLogger("bot.callbacks")
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Central router for all inline keyboard callback queries.
-    Format parsing pattern: 'action:param1:param2'
+    Main router for all inline button callbacks in the bot.
+    Handles voting, revoting, refreshing, closing, deleting, dynamic results, and admin actions.
     """
     query = update.callback_query
     if not query:
         return
 
     data = query.data
-    user = query.from_user
-    if not user:
+    if not data:
         return
 
-    # Ensure user is registered
-    await database.register_user(user.id, user.username, user.first_name)
+    user = query.from_user
 
-    # Route by callback prefix
+    # 1. Handle Vote Casting: vote:<poll_id>:<option_idx>
     if data.startswith("vote:"):
-        _, poll_id, opt_idx_str = data.split(":")
-        await handle_vote(update, context, poll_id, int(opt_idx_str))
+        parts = data.split(":")
+        if len(parts) >= 3:
+            poll_id = parts[1]
+            try:
+                option_idx = int(parts[2])
+            except ValueError:
+                await query.answer("❌ Invalid option selection.", show_alert=True)
+                return
+            await handle_vote_action(update, context, poll_id, option_idx)
+            return
+
+    # 2. Handle Revote Action: revote:<poll_id>
+    elif data.startswith("revote:"):
+        parts = data.split(":")
+        if len(parts) >= 2:
+            poll_id = parts[1]
+            await handle_revote_action(update, context, poll_id)
+            return
+
+    # 3. Handle Refresh Poll View: refresh:<poll_id>
     elif data.startswith("refresh:"):
-        _, poll_id = data.split(":")
-        await handle_refresh_poll(update, context, poll_id)
-    elif data.startswith("fav:"):
-        _, poll_id = data.split(":")
-        await handle_toggle_favorite(update, context, poll_id)
+        parts = data.split(":")
+        if len(parts) >= 2:
+            poll_id = parts[1]
+            await handle_refresh_poll(update, context, poll_id)
+            return
+
+    # 4. Handle Close Poll: close:<poll_id>
     elif data.startswith("close:"):
-        _, poll_id = data.split(":")
-        await handle_close_poll(update, context, poll_id)
+        parts = data.split(":")
+        if len(parts) >= 2:
+            poll_id = parts[1]
+            await handle_close_poll(update, context, poll_id)
+            return
+
+    # 5. Handle Delete Poll: delete:<poll_id>
     elif data.startswith("delete:"):
-        _, poll_id = data.split(":")
-        await handle_delete_poll(update, context, poll_id)
+        parts = data.split(":")
+        if len(parts) >= 2:
+            poll_id = parts[1]
+            await handle_delete_poll(update, context, poll_id)
+            return
+
+    # 6. Handle Favorite Toggle: fav:<poll_id>
+    elif data.startswith("fav:"):
+        parts = data.split(":")
+        if len(parts) >= 2:
+            poll_id = parts[1]
+            is_fav = await database.toggle_favorite(user.id, poll_id)
+            status_msg = "⭐ Saved to Favorites!" if is_fav else "❌ Removed from Favorites."
+            await query.answer(status_msg, show_alert=True)
+            await handle_refresh_poll(update, context, poll_id)
+            return
+
+    # 7. Admin Panel Buttons
     elif data.startswith("admin_"):
         await handle_admin_callbacks(update, context, data)
-    else:
-        await query.answer("⚠️ Unknown action command.", show_alert=True)
+        return
 
-async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str, option_index: int):
-    """Processes user vote on specific poll option."""
+    else:
+        await query.answer("ℹ️ Unrecognized button command.", show_alert=True)
+
+async def handle_vote_action(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str, option_idx: int):
+    """Processes user vote submission asynchronously."""
     query = update.callback_query
     if not query or not query.from_user:
         return
 
     user = query.from_user
-    success, message = await database.cast_vote(poll_id, user.id, option_index)
+    # Ensure user exists in database
+    await database.get_or_create_user(user.id, user.username or "", user.full_name or "")
 
-    if success:
-        # Reward user +10 XP per vote
-        xp, level, leveled_up = await database.add_xp(user.id, 10)
-        pop_msg = f"✅ {message}\n+10 XP awarded!"
-        if leveled_up:
-            rank = calculate_rank(level)
-            pop_msg += f"\n🎉 LEVEL UP! You reached Level {level} ({rank})!"
-        await query.answer(pop_msg, show_alert=True)
+    poll_obj = await database.get_poll(poll_id)
+    if not poll_obj:
+        await query.answer("❌ This poll no longer exists.", show_alert=True)
+        return
 
-        # Refresh view
-        await handle_refresh_poll(update, context, poll_id)
+    if poll_obj.get("status") != "active":
+        await query.answer("🔒 Voting is closed on this poll.", show_alert=True)
+        return
+
+    # Check existing vote
+    existing_vote = await database.get_user_vote(user.id, poll_id)
+    if existing_vote:
+        if not poll_obj.get("allow_revote", 1):
+            await query.answer("⚠️ You have already voted on this poll! Revoting is disabled.", show_alert=True)
+            return
+        else:
+            # Change existing vote
+            await database.cast_vote(user.id, poll_id, option_idx)
+            await query.answer("🔄 Your vote has been updated!", show_alert=False)
     else:
-        await query.answer(f"⚠️ {message}", show_alert=True)
+        # Cast new vote and award XP
+        await database.cast_vote(user.id, poll_id, option_idx)
+        await database.add_user_xp(user.id, 10)
+        await query.answer("✅ Vote recorded! (+10 XP)", show_alert=False)
 
-async def handle_refresh_poll(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str):
-    """Refreshes poll card text and percentage bars without throwing unchanged text exceptions."""
+    # Refresh message UI with new counts
+    await handle_refresh_poll(update, context, poll_id)
+
+async def handle_revote_action(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str):
+    """Prompts or clears user's current choice to let them choose again."""
     query = update.callback_query
     if not query or not query.from_user:
         return
@@ -80,76 +133,75 @@ async def handle_refresh_poll(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = query.from_user
     poll_obj = await database.get_poll(poll_id)
     if not poll_obj:
-        await query.answer("❌ Poll no longer exists.", show_alert=True)
+        await query.answer("❌ Poll not found.", show_alert=True)
         return
 
-    results = await database.get_poll_results(poll_id)
-    user_voted_opt = await database.get_user_voted_option(poll_id, user.id)
-    is_fav = await database.is_favorite(user.id, poll_id)
-    is_closed = bool(poll_obj.get("is_closed", 0))
-    is_owner = (poll_obj.get("creator_id") == user.id) or (user.id in ADMIN_IDS)
+    if not poll_obj.get("allow_revote", 1):
+        await query.answer("❌ Revoting is not permitted for this poll.", show_alert=True)
+        return
 
-    updated_text = (
-        f"📊 **{poll_obj['title']}**\n"
-        f"_{poll_obj.get('description', '')}_\n\n"
-        f"{generate_poll_results_text(results, user_voted_opt)}\n"
-        f"🆔 `Poll ID: {poll_id}`"
-    )
+    existing_vote = await database.get_user_vote(user.id, poll_id)
+    if not existing_vote:
+        await query.answer("ℹ️ You haven't voted yet!", show_alert=True)
+        return
+
+    await query.answer("🔄 Select any option above to change your vote.", show_alert=True)
+
+async def handle_refresh_poll(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str):
+    """Refreshes the rendered progress bar breakdown and keyboard buttons for the target poll."""
+    query = update.callback_query
+    if not query or not query.message:
+        return
+
+    user = query.from_user
+    poll_obj = await database.get_poll(poll_id)
+    if not poll_obj:
+        return
+
+    options = poll_obj.get("options", [])
+    total_votes = poll_obj.get("total_votes", 0)
+    is_closed = poll_obj.get("status") != "active"
+    hide_results = poll_obj.get("hide_results_until_closed", 0) and not is_closed
+
+    user_vote = await database.get_user_vote(user.id, poll_id) if user else None
+    user_voted_opt = user_vote.get("option_index") if user_vote else None
+    is_fav = await database.is_favorite(user.id, poll_id) if user else False
+    is_owner = (poll_obj.get("creator_id") == user.id) if user else False
+
+    # Format poll results body text
+    body = f"📊 **{poll_obj.get('title')}**\n"
+    if poll_obj.get('description'):
+        body += f"_{poll_obj.get('description')}_\n"
+    body += "----------------------------------------\n\n"
+
+    if hide_results:
+        body += "🔒 *Results are hidden until voting closes.*\n\n"
+        for opt in options:
+            mark = " 👈 (Your Choice)" if opt.get("option_index") == user_voted_opt else ""
+            body += f"• **{opt.get('option_text')}**{mark}\n"
+    else:
+        for opt in options:
+            opt_cnt = opt.get("vote_count", 0)
+            percentage = (opt_cnt / total_votes * 100) if total_votes > 0 else 0.0
+            bar = generate_progress_bar(percentage)
+            mark = " 👈" if opt.get("option_index") == user_voted_opt else ""
+            body += f"**{opt.get('option_text')}**{mark}\n`{bar}` {percentage:.1f}% ({opt_cnt} votes)\n\n"
+
+    footer_text = await database.get_setting("footer_text", "⚡ Powered by Telegram Poll Battle Bot")
+    body += f"🗳️ Total Votes: `{total_votes}` | Status: `{'CLOSED 🔒' if is_closed else 'ACTIVE 🟢'}`\n\n_{footer_text}_"
 
     try:
-        await query.edit_message_text(
-            text=updated_text,
+        await query.message.edit_text(
+            text=body,
             reply_markup=get_poll_inline_keyboard(
                 poll_id=poll_id,
-                options=poll_obj["options"],
-                user_voted_option=user_voted_opt,
+                options=options,
+                user_voted_opt=user_voted_opt,
                 is_closed=is_closed,
                 is_fav=is_fav,
                 is_owner=is_owner
             ),
             parse_mode="Markdown"
-        )
-        await query.answer("🔄 Refresh completed!")
-    except Exception as e:
-        # Ignore message not modified exception
-        if "Message is not modified" in str(e):
-            await query.answer("✨ Results are already up-to-date!")
-        else:
-            await query.answer("🔄 Updated.")
-
-async def handle_toggle_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str):
-    """Toggles saved favorite state for poll."""
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-
-    user = query.from_user
-    is_fav = await database.toggle_favorite(user.id, poll_id)
-    poll_obj = await database.get_poll(poll_id)
-
-    if is_fav:
-        await query.answer("⭐ Saved to your Favorites!", show_alert=True)
-    else:
-        await query.answer("🗑️ Removed from Favorites.", show_alert=True)
-
-    if not poll_obj:
-        return
-
-    results = await database.get_poll_results(poll_id)
-    user_voted_opt = await database.get_user_voted_option(poll_id, user.id)
-    is_closed = bool(poll_obj.get("is_closed", 0))
-    is_owner = (poll_obj.get("creator_id") == user.id) or (user.id in ADMIN_IDS)
-
-    try:
-        await query.edit_message_reply_markup(
-            reply_markup=get_poll_inline_keyboard(
-                poll_id=poll_id,
-                options=poll_obj["options"],
-                user_voted_option=user_voted_opt,
-                is_closed=is_closed,
-                is_fav=is_fav,
-                is_owner=is_owner
-            )
         )
     except Exception:
         pass
@@ -229,5 +281,5 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await query.answer(f"Admin action: {callback_data}")
 
-# Alias for compatibility across imports
+# Alias for compatibility
 handle_callback_query = callback_query_handler
