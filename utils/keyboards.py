@@ -150,6 +150,18 @@ def get_admin_dashboard_keyboard() -> InlineKeyboardMarkup:
         ]
     ])
 
+def get_admin_broadcast_types_keyboard() -> InlineKeyboardMarkup:
+    """Selection options for admin announcement broadcast formats."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💬 Text Announcement", callback_data="bc_type_text"),
+            InlineKeyboardButton("🖼️ Photo / Media", callback_data="bc_type_media")
+        ],
+        [
+            InlineKeyboardButton("➡️ Forward Message", callback_data="bc_type_forward")
+        ]
+    ])
+
 def get_confirmation_keyboard(action_code: str) -> InlineKeyboardMarkup:
     """Generic confirmation keyboard."""
     return InlineKeyboardMarkup([
