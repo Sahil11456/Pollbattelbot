@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bot Credentials & Administration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8871940323:AAHlQU6eytIp3-KVaMWQhYes6T5dMEo6u5E")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8268393848:AAFUTGPtuSCWs9t59eiUo_b4oX8NoVnQ6mc")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "5636959648").split(",") if x.strip().isdigit()]
 
 # Database Configuration
