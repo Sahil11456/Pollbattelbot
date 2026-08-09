@@ -1,17 +1,15 @@
 import os
 import sys
 import logging
-import asyncio
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
-    ContextTypes,
-    filters
+    MessageHandler,
+    filters,
+    ContextTypes
 )
-from dotenv import load_dotenv
 
 # Path setups
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,13 +18,13 @@ from config import BOT_TOKEN, LOG_LEVEL
 from database import init_db
 from handlers.start import start_handler
 from handlers.createpoll import get_create_poll_handler
-from handlers.mypolls import my_polls_handler
-from handlers.admin import admin_dashboard_handler, get_broadcast_conversation_handler
-from handlers.settings import settings_menu_handler, set_footer_command, toggle_autopost_command, toggle_device_guard_command
+from handlers.mypolls import mypolls_handler
+from handlers.trending import trending_polls_handler
+from handlers.favorites import favorites_handler
+from handlers.admin import admin_dashboard_handler, get_broadcast_conversation_handler, set_footer_command, toggle_autopost_command, toggle_device_guard_command
+from handlers.settings import settings_handler
 from handlers.profile import profile_handler
 from handlers.search import get_search_conversation_handler
-from handlers.trending import trending_polls_menu_handler
-from handlers.favorites import favorites_list_handler
 from handlers.statistics import statistics_handler
 from handlers.leaderboard import leaderboard_menu_handler
 from handlers.help import help_handler
@@ -55,67 +53,65 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot.main")
 
-async def check_expired_polls_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic job task to process expired poll winner announcements."""
-    logger.info("Running periodic background check for expired poll arenas...")
-    try:
-        await WinnerService.check_and_process_expired_polls(context.bot)
-    except Exception as e:
-        logger.error(f"Error executing WinnerService background routine: {e}")
-
-async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes main menu reply keyboard button taps to appropriate handlers."""
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text.strip()
-    
-    # Run maintenance check middleware
-    if await check_maintenance(update, context):
-        return
-
-    # Run ban check middleware
-    if await check_banned(update, context):
-        return
-
-    if text in ["➕ Create Poll", "➕ Naya Poll Banayein"]:
-        # Triggers create poll wizard conversation
-        handler = get_create_poll_handler()
-        await handler.handle_update(update, context.application, context)
-    elif text in ["📊 My Polls", "📊 Mere Polls"]:
-        await my_polls_handler(update, context)
-    elif text in ["🔥 Trending Polls", "🔥 Local Arena"]:
-        await trending_polls_menu_handler(update, context)
-    elif text in ["⭐ Saved Polls", "⭐ Saved Favorites"]:
-        await favorites_list_handler(update, context)
-    elif text in ["🏆 Hall of Fame", "🏆 Leaderboard"]:
-        await leaderboard_menu_handler(update, context)
-    elif text in ["🔍 Search Polls", "🔍 Search"]:
-        search_handler = get_search_conversation_handler()
-        await search_handler.handle_update(update, context.application, context)
-    elif text in ["👤 Voter Profile", "👤 Profile"]:
-        await profile_handler(update, context)
-    elif text in ["📈 System Analytics", "📈 Statistics"]:
-        await statistics_handler(update, context)
-    elif text in ["⚙️ Admin Dashboard", "⚙️ System Settings"]:
-        await settings_menu_handler(update, context)
-    elif text in ["❓ Bot Guide & FAQ", "❓ Help Center"]:
-        await help_handler(update, context)
-    else:
-        await update.message.reply_text("💡 Button command not recognized. Use the persistent menu buttons or `/help` guide.")
-
-async def post_init(application: Application):
-    """Executes after bot initialization to initialize DB, verify token and clear webhooks."""
-    logger.info("Initializing SQLite database tables...")
+async def post_init(application: Application) -> None:
+    """Post-initialization hook to verify database, tables, and bot connectivity."""
+    logger.info("Initializing SQLite database connection and schemas...")
     await init_db()
+    logger.info("Database schemas verified successfully!")
+
     try:
         me = await application.bot.get_me()
-        logger.info(f"✅ BOT CONNECTED SUCCESSFULLY: @{me.username} (ID: {me.id})")
+        logger.info(f"🤖 BOT CONNECTED SUCCESSFULLY: @{me.username} (ID: {me.id})")
         logger.info("Clearing old webhooks and pending updates...")
         await application.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         logger.error(f"❌ Failed to authenticate bot token with Telegram API: {e}")
         raise e
+
+async def check_expired_polls_job(context: ContextTypes.DEFAULT_TYPE):
+    """Background cron job running every 60 seconds to automatically close expired polls."""
+    try:
+        count = await WinnerService.check_and_close_expired_polls(context)
+        if count > 0:
+            logger.info(f"🏁 Concluded and announced winners for {count} expired poll(s).")
+    except Exception as e:
+        logger.error(f"Error executing winner check job: {e}")
+
+async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes keyboard button text presses to their corresponding handler logic."""
+    if not update.message or not update.message.text:
+        return
+
+    # Check ban & maintenance mode
+    if await check_banned(update, context):
+        return
+    if await check_maintenance(update, context):
+        return
+
+    text = update.message.text.strip()
+
+    if text == "➕ Create Poll":
+        # Handled by conversation handler entry point
+        pass
+    elif text == "📝 My Polls":
+        await mypolls_handler(update, context)
+    elif text == "🔥 Trending":
+        await trending_polls_handler(update, context)
+    elif text == "⭐ Favorites":
+        await favorites_handler(update, context)
+    elif text == "🏆 Leaderboard":
+        await leaderboard_menu_handler(update, context)
+    elif text == "🔍 Search Polls":
+        # Handled by search conversation handler
+        pass
+    elif text == "👤 My Profile":
+        await profile_handler(update, context)
+    elif text == "📊 Statistics":
+        await statistics_handler(update, context)
+    elif text == "⚙️ Settings":
+        await settings_handler(update, context)
+    elif text == "❓ Help":
+        await help_handler(update, context)
 
 def main():
     """Bootstraps and runs the Poll Battle Bot engine."""
