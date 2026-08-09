@@ -37,6 +37,9 @@ from middlewares.error_handler import error_handler_middleware
 from middlewares.ban_checker import check_banned
 from middlewares.maintenance import check_maintenance
 
+# Ensure logs directory exists
+os.makedirs("logs", exist_ok=True)
+
 # Configure Logger
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
