@@ -38,3 +38,4 @@ XP_PER_POLL = int(os.getenv("XP_PER_POLL", "25"))
 # Bot Maintenance & System Defaults
 MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "false").lower() == "true"
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
