@@ -67,6 +67,7 @@ async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if text == "🌍 Active Polls":
+        # Handled by listing featured/all active polls or searching
         from handlers.search import start_search_handler
         await start_search_handler(update, context)
     elif text == "🔥 Trending Polls":
@@ -88,6 +89,7 @@ async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "❓ Help":
         await help_handler(update, context)
     else:
+        # Check if they are responding to any admin broadcast flows or searches
         bc_type = context.user_data.get('bc_type')
         if bc_type == 'text':
             from handlers.admin import bc_msg_received
@@ -100,12 +102,24 @@ async def text_router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await search_query_received(update, context)
             return
 
+        # Default help
         await update.message.reply_text("💡 Button command not recognized. Use the persistent menu buttons or `/help` guide.")
 
-async def main():
+async def post_init(application: Application):
+    """Executes after bot initialization to verify token and clear webhooks."""
+    try:
+        me = await application.bot.get_me()
+        logger.info(f"✅ BOT CONNECTED SUCCESSFULLY: @{me.username} (ID: {me.id})")
+        logger.info("Clearing old webhooks and pending updates...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.error(f"❌ Failed to authenticate bot token with Telegram API: {e}")
+        raise e
+
+def main():
     """Bootstraps and runs the Poll Battle Bot engine."""
     logger.info("Initializing SQLite database tables...")
-    await init_db()
+    asyncio.run(init_db())
 
     # Validate bot token
     if not BOT_TOKEN or BOT_TOKEN == "MOCK_TOKEN_FOR_SETUP":
@@ -114,8 +128,8 @@ async def main():
         sys.exit(1)
 
     logger.info("Starting Telegram Bot Application context builder...")
-    # Initialize application
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Initialize application with post_init hook
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Register JobQueue task to run every 60 seconds (checks for poll closures)
     if app.job_queue:
@@ -149,29 +163,12 @@ async def main():
     # 6. Global System Exception interceptor
     app.add_error_handler(error_handler_middleware)
 
-    # Clear old webhooks and pending updates to enable long-polling
-    logger.info("Clearing webhooks and pending updates...")
-    await app.bot.delete_webhook(drop_pending_updates=True)
-
     logger.info("Poll Battle Bot is ONLINE and listening for events!")
-    # Start bot polling loop
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    
-    # Run loop until terminated
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Received close signal. Safely halting updater...")
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-        logger.info("Systems shut down completely. Good bye!")
+    # Start bot polling loop using standard run_polling
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
+        main()
+    except (KeyboardInterrupt, SystemExit):
         pass
