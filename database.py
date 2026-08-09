@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import aiosqlite
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 
@@ -9,18 +10,19 @@ from config import DATABASE_PATH, ADMIN_IDS
 
 logger = logging.getLogger("bot.database")
 
-async def get_db_connection() -> aiosqlite.Connection:
-    """Returns an active aiosqlite connection with foreign keys enabled."""
-    conn = await aiosqlite.connect(DATABASE_PATH)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA foreign_keys = ON;")
-    await conn.execute("PRAGMA journal_mode = WAL;")
-    await conn.execute("PRAGMA synchronous = NORMAL;")
-    return conn
+@asynccontextmanager
+async def get_db_connection():
+    """Yields an active aiosqlite connection with foreign keys enabled."""
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON;")
+        await conn.execute("PRAGMA journal_mode = WAL;")
+        await conn.execute("PRAGMA synchronous = NORMAL;")
+        yield conn
 
 async def init_db():
     """Initializes the database schema with all required tables, indices, and constraints."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         # 1. Users Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -186,7 +188,7 @@ async def init_db():
 
 async def register_user(user_id: int, username: str, full_name: str, role: str = 'user') -> Dict[str, Any]:
     """Registers or updates a user in the database."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("""
             INSERT INTO users (user_id, username, full_name, role)
             VALUES (?, ?, ?, ?)
@@ -199,7 +201,7 @@ async def register_user(user_id: int, username: str, full_name: str, role: str =
 
 async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
     """Retrieves a single user by user_id."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
@@ -209,7 +211,7 @@ async def get_or_create_user(user_id: int, username: str = "Anonymous", full_nam
     user = await get_user(user_id)
     if user:
         if (user.get("username") != username or user.get("full_name") != full_name) and username and full_name:
-            async with await get_db_connection() as conn:
+            async with get_db_connection() as conn:
                 await conn.execute(
                     "UPDATE users SET username = ?, full_name = ? WHERE user_id = ?;",
                     (username, full_name, user_id)
@@ -231,14 +233,14 @@ async def get_or_create_user(user_id: int, username: str = "Anonymous", full_nam
 
 async def get_user_polls_count(user_id: int) -> int:
     """Returns count of polls created by user."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT COUNT(*) as cnt FROM polls WHERE creator_id = ?;", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row["cnt"] if row else 0
 
 async def get_user_votes_count(user_id: int) -> int:
     """Returns count of votes cast by user."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT COUNT(*) as cnt FROM votes WHERE user_id = ?;", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row["cnt"] if row else 0
@@ -267,14 +269,14 @@ async def get_user_achievements(user_id: int) -> List[Dict[str, Any]]:
 
 async def get_all_users() -> List[Dict[str, Any]]:
     """Retrieves all registered users."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT * FROM users ORDER BY registration_date DESC;") as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
 async def ban_user(user_id: int, reason: str = "") -> bool:
     """Bans a user."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("""
             UPDATE users SET is_banned = 1, ban_reason = ? WHERE user_id = ?;
         """, (reason, user_id))
@@ -283,7 +285,7 @@ async def ban_user(user_id: int, reason: str = "") -> bool:
 
 async def unban_user(user_id: int) -> bool:
     """Unbans a user."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("UPDATE users SET is_banned = 0, ban_reason = '' WHERE user_id = ?;", (user_id,))
         await conn.commit()
         return True
@@ -295,7 +297,7 @@ async def is_user_banned(user_id: int) -> bool:
 
 async def update_user_xp(user_id: int, amount: int = 10) -> Tuple[int, int]:
     """Adds XP to user and handles level ups."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         user = await get_user(user_id)
         if not user:
             return 1, 0
@@ -358,7 +360,7 @@ async def create_poll(
     expires_at: Optional[str] = None
 ) -> str:
     """Creates a new poll with its options."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("""
             INSERT INTO polls (
                 poll_id, creator_id, title, description, poll_type,
@@ -385,7 +387,7 @@ async def create_poll(
 
 async def get_poll(poll_id: str) -> Optional[Dict[str, Any]]:
     """Fetches poll details by poll_id."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT * FROM polls WHERE poll_id = ?;", (poll_id,)) as cursor:
             row = await cursor.fetchone()
             if not row:
@@ -395,7 +397,7 @@ async def get_poll(poll_id: str) -> Optional[Dict[str, Any]]:
 
 async def get_user_polls(user_id: int) -> List[Dict[str, Any]]:
     """Retrieves all polls created by a user."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute(
             "SELECT * FROM polls WHERE creator_id = ? ORDER BY created_at DESC;",
             (user_id,)
@@ -410,7 +412,7 @@ async def get_user_polls(user_id: int) -> List[Dict[str, Any]]:
 
 async def get_active_polls() -> List[Dict[str, Any]]:
     """Retrieves all active public polls."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute(
             "SELECT * FROM polls WHERE status = 'active' AND is_public = 1 ORDER BY created_at DESC;"
         ) as cursor:
@@ -424,7 +426,7 @@ async def get_active_polls() -> List[Dict[str, Any]]:
 
 async def get_trending_polls(limit: int = 5, order_by: str = "votes") -> List[Dict[str, Any]]:
     """Retrieves top public active polls ordered by votes, views, or date."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         order_clause = "ORDER BY (SELECT COUNT(*) FROM votes WHERE poll_id = polls.poll_id) DESC"
         if order_by == "views":
             order_clause = "ORDER BY views DESC"
@@ -442,7 +444,7 @@ async def get_trending_polls(limit: int = 5, order_by: str = "votes") -> List[Di
 
 async def get_expired_active_polls() -> List[Dict[str, Any]]:
     """Retrieves active polls that have passed their expiration timestamp."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         now_str = datetime.utcnow().isoformat()
         async with conn.execute(
             "SELECT * FROM polls WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?;",
@@ -453,33 +455,33 @@ async def get_expired_active_polls() -> List[Dict[str, Any]]:
 
 async def close_poll(poll_id: str) -> bool:
     """Closes an active poll."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("UPDATE polls SET status = 'closed' WHERE poll_id = ?;", (poll_id,))
         await conn.commit()
         return True
 
 async def delete_poll(poll_id: str) -> bool:
     """Deletes a poll and associated records."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("DELETE FROM polls WHERE poll_id = ?;", (poll_id,))
         await conn.commit()
         return True
 
 async def increment_poll_views(poll_id: str):
     """Increments the view count of a poll."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("UPDATE polls SET views = views + 1 WHERE poll_id = ?;", (poll_id,))
         await conn.commit()
 
 async def increment_poll_shares(poll_id: str):
     """Increments the share count of a poll."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("UPDATE polls SET shares = shares + 1 WHERE poll_id = ?;", (poll_id,))
         await conn.commit()
 
 async def search_polls(query: str, field: str = "all", limit: int = 10) -> List[Dict[str, Any]]:
     """Searches public polls by title or description."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         pattern = f"%{query}%"
         async with conn.execute("""
             SELECT * FROM polls
@@ -499,7 +501,7 @@ async def search_polls(query: str, field: str = "all", limit: int = 10) -> List[
 
 async def cast_vote(poll_id: str, user_id: int, option_index: int) -> Tuple[bool, str]:
     """Casts or updates a user's vote on a poll."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         poll = await get_poll(poll_id)
         if not poll:
             return False, "Poll not found."
@@ -555,7 +557,7 @@ async def get_user_vote(arg1: Any, arg2: Any) -> Optional[Dict[str, int]]:
     else:
         user_id, poll_id = int(arg1), str(arg2)
 
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute(
             "SELECT option_index FROM votes WHERE poll_id = ? AND user_id = ?;",
             (poll_id, user_id)
@@ -568,7 +570,7 @@ async def get_user_vote(arg1: Any, arg2: Any) -> Optional[Dict[str, int]]:
 
 async def add_favorite(user_id: int, poll_id: str) -> bool:
     """Adds a poll to user's favorites."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("""
             INSERT OR IGNORE INTO favorites (user_id, poll_id) VALUES (?, ?);
         """, (user_id, poll_id))
@@ -577,7 +579,7 @@ async def add_favorite(user_id: int, poll_id: str) -> bool:
 
 async def remove_favorite(user_id: int, poll_id: str) -> bool:
     """Removes a poll from user's favorites."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("DELETE FROM favorites WHERE user_id = ? AND poll_id = ?;", (user_id, poll_id))
         await conn.commit()
         return True
@@ -589,7 +591,7 @@ async def is_favorite(arg1: Any, arg2: Any) -> bool:
     else:
         user_id, poll_id = int(arg1), str(arg2)
 
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute(
             "SELECT 1 FROM favorites WHERE user_id = ? AND poll_id = ?;",
             (user_id, poll_id)
@@ -608,7 +610,7 @@ async def toggle_favorite(user_id: int, poll_id: str) -> bool:
 
 async def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
     """Gets all favorite polls for a user."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("""
             SELECT p.* FROM polls p
             JOIN favorites f ON p.poll_id = f.poll_id
@@ -628,7 +630,7 @@ async def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
 
 async def add_force_join_channel(channel_username: str, channel_title: str = "") -> bool:
     """Adds or updates a required force join channel by username."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("""
             INSERT INTO force_join_channels (channel_username, channel_title, is_active)
             VALUES (?, ?, 1)
@@ -641,14 +643,14 @@ async def add_force_join_channel(channel_username: str, channel_title: str = "")
 
 async def remove_force_join_channel(channel_id: int) -> bool:
     """Deactivates/removes a force join channel."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("DELETE FROM force_join_channels WHERE channel_id = ?;", (channel_id,))
         await conn.commit()
         return True
 
 async def get_force_join_channels() -> List[Dict[str, Any]]:
     """Retrieves all active force join channels."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute(
             "SELECT * FROM force_join_channels WHERE is_active = 1;"
         ) as cursor:
@@ -660,7 +662,7 @@ async def get_force_join_channels() -> List[Dict[str, Any]]:
 
 async def get_leaderboard(limit: int = 10, criteria: str = "xp") -> List[Dict[str, Any]]:
     """Retrieves top users by XP, created polls, or votes cast."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         if criteria in ("creators", "creator"):
             query = """
                 SELECT u.user_id, u.username, u.full_name, u.level, u.rank,
@@ -692,7 +694,7 @@ async def get_leaderboard(limit: int = 10, criteria: str = "xp") -> List[Dict[st
 
 async def get_system_stats() -> Dict[str, Any]:
     """Gathers overall system statistics for admin dashboard."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT COUNT(*) as cnt FROM users;") as c:
             users_cnt = (await c.fetchone())["cnt"]
         async with conn.execute("SELECT COUNT(*) as cnt FROM polls;") as c:
@@ -714,14 +716,14 @@ async def get_system_stats() -> Dict[str, Any]:
 
 async def get_setting(key: str, default: str = "") -> str:
     """Gets a global setting value."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         async with conn.execute("SELECT setting_value FROM settings WHERE setting_key = ?;", (key,)) as cursor:
             row = await cursor.fetchone()
             return row["setting_value"] if row else default
 
 async def set_setting(key: str, value: str) -> bool:
     """Sets a global setting value."""
-    async with await get_db_connection() as conn:
+    async with get_db_connection() as conn:
         await conn.execute("""
             INSERT INTO settings (setting_key, setting_value, updated_at)
             VALUES (?, ?, CURRENT_TIMESTAMP)
