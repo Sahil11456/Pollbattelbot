@@ -1,86 +1,75 @@
-import sys
-import asyncio
 import logging
+import asyncio
 from telegram import Update
 from telegram.ext import (
     Application,
-    ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
-    ContextTypes,
+    MessageHandler,
     filters,
+    ContextTypes
 )
 
-from config import BOT_TOKEN, ADMIN_IDS
+from config import BOT_TOKEN, LOG_LEVEL
 from database import init_db
-from callbacks import handle_callback_query
-from services.winner import start_winner_announcer_task
-
-# Handlers
 from handlers.start import start_handler
-from handlers.createpoll import create_poll_conv_handler
+from handlers.createpoll import poll_creation_conv
 from handlers.mypolls import my_polls_handler
 from handlers.trending import trending_polls_handler
-from handlers.favorites import favorites_handler
-from handlers.leaderboard import leaderboard_handler
-from handlers.search import search_handler
+from handlers.favorites import favorite_polls_handler
+from handlers.search import search_polls_handler
 from handlers.profile import profile_handler
-from handlers.statistics import stats_handler
-from handlers.forcejoin import force_join_handler, check_join_callback
-from handlers.admin import admin_handler
-from handlers.help import help_handler
+from handlers.statistics import statistics_handler
+from handlers.admin import admin_panel_handler, broadcast_conv_handler
 from handlers.settings import settings_handler
-
-# Middlewares
-from middlewares.error_handler import global_error_handler
-from middlewares.ban_checker import check_ban
+from handlers.leaderboard import leaderboard_menu_handler
+from handlers.help import help_handler
+from handlers.forcejoin import add_channel_command, ban_user_command, unban_user_command
+try:
+    from callbacks import callback_query_handler, handle_callback_query
+except ImportError:
+    from callbacks import callback_query_handler
+    handle_callback_query = callback_query_handler
+from services.winner import WinnerService
+from middlewares.error_handler import error_handler_middleware
+from middlewares.ban_checker import check_banned
 from middlewares.maintenance import check_maintenance
 
-# Configure Logging
+# Configure Logging System
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=getattr(logging, LOG_LEVEL, logging.INFO)
 )
 logger = logging.getLogger("bot.main")
 
-@check_ban
-@check_maintenance
-async def menu_button_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes persistent reply menu button clicks to corresponding handlers."""
+async def menu_text_button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes persistent reply keyboard text buttons to corresponding handlers."""
     if not update.message or not update.message.text:
         return
 
     text = update.message.text.strip()
+    logger.info(f"User {update.effective_user.id if update.effective_user else 'Unknown'} pressed menu button: {text}")
 
-    if text in ["➕ Create Poll", "➕ Naya Poll Banayein"]:
-        await update.message.reply_text(
-            "💡 To create a poll, click /createpoll or choose from the options below!"
-        )
-    elif text in ["📊 My Polls", "📁 Mere Polls"]:
+    if text in ["➕ Create Poll", "Create Poll"]:
+        await update.message.reply_text("🚀 Send `/create` to start the poll creation wizard!", parse_mode="Markdown")
+    elif text in ["📊 My Polls", "My Polls"]:
         await my_polls_handler(update, context)
-    elif text in ["🔥 Trending Polls", "🔥 Trending"]:
+    elif text in ["🔥 Trending", "Trending"]:
         await trending_polls_handler(update, context)
-    elif text in ["⭐ Saved Favorites", "⭐ Favorites"]:
-        await favorites_handler(update, context)
-    elif text in ["🏆 Leaderboard", "🏆 Rank Board"]:
-        await leaderboard_handler(update, context)
-    elif text in ["🔍 Search Polls", "🔍 Search"]:
-        await update.message.reply_text(
-            "🔍 **Search Polls**\n\nType `/search <keyword>` to find polls by title or topic.\nExample: `/search tech`",
-            parse_mode="Markdown"
-        )
-    elif text in ["👤 Voter Profile", "👤 Profile"]:
+    elif text in ["⭐ Saved / Favorites", "Saved / Favorites"]:
+        await favorite_polls_handler(update, context)
+    elif text in ["👤 Profile & XP", "Profile & XP"]:
         await profile_handler(update, context)
-    elif text in ["📈 System Stats", "📊 Statistics"]:
-        await stats_handler(update, context)
-    elif text in ["ℹ️ Help & FAQ", "❓ Help"]:
-        await help_handler(update, context)
-    elif text in ["⚙️ Admin Settings", "⚙️ Settings"]:
+    elif text in ["🏆 Leaderboard", "Leaderboard"]:
+        await leaderboard_menu_handler(update, context)
+    elif text in ["🔍 Search Polls", "Search Polls"]:
+        await update.message.reply_text("🔎 Usage: `/search <keywords>` to locate polls.", parse_mode="Markdown")
+    elif text in ["📈 System Stats", "System Stats"]:
+        await statistics_handler(update, context)
+    elif text in ["⚙️ Settings", "Settings"]:
         await settings_handler(update, context)
+    elif text in ["❓ Help & FAQ", "Help & FAQ"]:
+        await help_handler(update, context)
     else:
         await update.message.reply_text("💡 Button command not recognized. Use the persistent menu buttons or `/help` guide.")
 
@@ -92,10 +81,8 @@ async def post_init(application: Application):
         me = await application.bot.get_me()
         logger.info(f"✅ BOT CONNECTED SUCCESSFULLY: @{me.username} (ID: {me.id})")
         await application.bot.delete_webhook(drop_pending_updates=True)
-        # Start winner background loop
-        asyncio.create_task(start_winner_announcer_task(application.bot))
     except Exception as e:
-        logger.error(f"❌ Failed connecting to Telegram API: {e}")
+        logger.error(f"⚠️ Failed bot connectivity verification: {e}")
 
 def main():
     """Bootstraps and runs the Poll Battle Bot engine."""
@@ -103,48 +90,52 @@ def main():
     if not BOT_TOKEN or BOT_TOKEN == "MOCK_TOKEN_FOR_SETUP":
         logger.critical("BOT_TOKEN is missing or set to placeholder value! Please supply a valid Telegram bot token inside Railway Environment Variables.")
         print("\n" + "="*70)
-        print(" CRITICAL ERROR: BOT_TOKEN Environment Variable Missing!")
-        print(" Please set BOT_TOKEN inside your Railway project environment variables.")
+        print("❌ CRITICAL ERROR: BOT_TOKEN Environment Variable is NOT configured!")
+        print("👉 Add BOT_TOKEN = <Your_Telegram_Bot_Token> inside Railway dashboard.")
         print("="*70 + "\n")
+        return
 
     # Build Application
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    builder = Application.builder().token(BOT_TOKEN).post_init(post_init)
+    application = builder.build()
 
-    # Register Conversation Handler (Poll Wizard)
-    app.add_handler(create_poll_conv_handler)
+    # 1. Register Conversation Handlers
+    application.add_handler(poll_creation_conv)
+    application.add_handler(broadcast_conv_handler)
 
-    # Register Core Command Handlers
-    app.add_handler(CommandHandler("start", start_handler))
-    app.add_handler(CommandHandler("mypolls", my_polls_handler))
-    app.add_handler(CommandHandler("trending", trending_polls_handler))
-    app.add_handler(CommandHandler("favorites", favorites_handler))
-    app.add_handler(CommandHandler("leaderboard", leaderboard_handler))
-    app.add_handler(CommandHandler("search", search_handler))
-    app.add_handler(CommandHandler("profile", profile_handler))
-    app.add_handler(CommandHandler("stats", stats_handler))
-    app.add_handler(CommandHandler("forcejoin", force_join_handler))
-    app.add_handler(CommandHandler("admin", admin_handler))
-    app.add_handler(CommandHandler("help", help_handler))
-    app.add_handler(CommandHandler("settings", settings_handler))
+    # 2. Register Command Handlers
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("mypolls", my_polls_handler))
+    application.add_handler(CommandHandler("trending", trending_polls_handler))
+    application.add_handler(CommandHandler("favorites", favorite_polls_handler))
+    application.add_handler(CommandHandler("search", search_polls_handler))
+    application.add_handler(CommandHandler("profile", profile_handler))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_menu_handler))
+    application.add_handler(CommandHandler("stats", statistics_handler))
+    application.add_handler(CommandHandler("admin", admin_panel_handler))
+    application.add_handler(CommandHandler("settings", settings_handler))
+    application.add_handler(CommandHandler("help", help_handler))
 
-    # Callback Query Router
-    app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
-    app.add_handler(CallbackQueryHandler(handle_callback_query))
+    # Force Join & Moderation Commands
+    application.add_handler(CommandHandler("addchannel", add_channel_command))
+    application.add_handler(CommandHandler("ban", ban_user_command))
+    application.add_handler(CommandHandler("unban", unban_user_command))
 
-    # Menu Button Text Handler
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_button_text_router))
+    # 3. Register Callback Query Handler
+    application.add_handler(CallbackQueryHandler(callback_query_handler))
 
-    # Global Exception Handler Middleware
-    app.add_error_handler(global_error_handler)
+    # 4. Register Persistent Reply Keyboard Router
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), menu_text_button_router))
 
-    # Start Polling
-    logger.info("🚀 Starting Poll Battle Bot Polling Engine...")
-    app.run_polling(poll_interval=1.0, drop_pending_updates=True)
+    # 5. Register Error Handler
+    application.add_error_handler(error_handler_middleware)
+
+    # 6. Initialize Background Services (Poll Expiration & Winner Announcer)
+    winner_service = WinnerService(application.bot, interval_seconds=60)
+    winner_service.start()
+
+    logger.info("🚀 Poll Battle Bot is starting polling loop...")
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
