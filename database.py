@@ -27,7 +27,7 @@ async def init_db():
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             full_name TEXT,
-            role TEXT DEFAULT 'user',
+            role TEXT DEFAULT 'user', -- 'user' or 'admin'
             xp INTEGER DEFAULT 0,
             level INTEGER DEFAULT 1,
             rank TEXT DEFAULT 'Beginner',
@@ -45,11 +45,11 @@ async def init_db():
             creator_id INTEGER NOT NULL,
             title TEXT NOT NULL,
             description TEXT DEFAULT '',
-            poll_type TEXT DEFAULT 'single',
+            poll_type TEXT DEFAULT 'single', -- 'single', 'multiple', 'quiz'
             is_anonymous INTEGER DEFAULT 0,
             is_public INTEGER DEFAULT 1,
             is_featured INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'active',
+            status TEXT DEFAULT 'active', -- 'active' or 'closed'
             quiz_correct_option INTEGER DEFAULT -1,
             allow_revote INTEGER DEFAULT 1,
             hide_results_until_closed INTEGER DEFAULT 0,
