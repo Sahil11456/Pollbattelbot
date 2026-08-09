@@ -5,7 +5,7 @@ import aiosqlite
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 
-from config import DATABASE_PATH
+from config import DATABASE_PATH, ADMIN_IDS
 
 logger = logging.getLogger("bot.database")
 
@@ -106,7 +106,7 @@ async def init_db():
         # 6. Force Join Channels Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS force_join_channels (
-            channel_id INTEGER PRIMARY KEY,
+            channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_username TEXT NOT NULL UNIQUE,
             channel_title TEXT DEFAULT '',
             is_active INTEGER DEFAULT 1,
@@ -144,6 +144,18 @@ async def init_db():
             total_votes_won INTEGER DEFAULT 0,
             announced_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (poll_id) REFERENCES polls (poll_id) ON DELETE CASCADE
+        );
+        """)
+
+        # 10. System Audit Logs Table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level TEXT DEFAULT 'INFO',
+            module TEXT DEFAULT '',
+            message TEXT NOT NULL,
+            user_id INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
@@ -191,6 +203,67 @@ async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
         async with conn.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+async def get_or_create_user(user_id: int, username: str = "Anonymous", full_name: str = "Anonymous User") -> Dict[str, Any]:
+    """Retrieves an existing user or creates a new user record with appropriate admin role."""
+    user = await get_user(user_id)
+    if user:
+        if (user.get("username") != username or user.get("full_name") != full_name) and username and full_name:
+            async with await get_db_connection() as conn:
+                await conn.execute(
+                    "UPDATE users SET username = ?, full_name = ? WHERE user_id = ?;",
+                    (username, full_name, user_id)
+                )
+                await conn.commit()
+                user["username"] = username
+                user["full_name"] = full_name
+        return user
+
+    role = "user"
+    if user_id in ADMIN_IDS:
+        role = "admin"
+    else:
+        all_users = await get_all_users()
+        if not all_users:
+            role = "admin"
+
+    return await register_user(user_id, username or "Anonymous", full_name or "Anonymous User", role)
+
+async def get_user_polls_count(user_id: int) -> int:
+    """Returns count of polls created by user."""
+    async with await get_db_connection() as conn:
+        async with conn.execute("SELECT COUNT(*) as cnt FROM polls WHERE creator_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row["cnt"] if row else 0
+
+async def get_user_votes_count(user_id: int) -> int:
+    """Returns count of votes cast by user."""
+    async with await get_db_connection() as conn:
+        async with conn.execute("SELECT COUNT(*) as cnt FROM votes WHERE user_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row["cnt"] if row else 0
+
+async def get_user_achievements(user_id: int) -> List[Dict[str, Any]]:
+    """Returns unlocked achievement milestones for a user."""
+    polls_cnt = await get_user_polls_count(user_id)
+    votes_cnt = await get_user_votes_count(user_id)
+    achievements = []
+
+    if votes_cnt >= 1:
+        achievements.append({"achievement_name": "🌱 First Vote Cast"})
+    if votes_cnt >= 10:
+        achievements.append({"achievement_name": "🗳️ Voting Centurion (10+ Votes)"})
+    if votes_cnt >= 50:
+        achievements.append({"achievement_name": "⚡ Democracy Master (50+ Votes)"})
+
+    if polls_cnt >= 1:
+        achievements.append({"achievement_name": "📝 Poll Creator Pioneer"})
+    if polls_cnt >= 5:
+        achievements.append({"achievement_name": "🔥 Poll Mastermind (5+ Polls)"})
+    if polls_cnt >= 20:
+        achievements.append({"achievement_name": "🌌 Battle Overlord (20+ Polls)"})
+
+    return achievements
 
 async def get_all_users() -> List[Dict[str, Any]]:
     """Retrieves all registered users."""
@@ -245,6 +318,27 @@ async def update_user_xp(user_id: int, amount: int = 10) -> Tuple[int, int]:
 
 # ================= POLL OPERATIONS =================
 
+async def _attach_poll_details(conn: aiosqlite.Connection, poll: Dict[str, Any]) -> Dict[str, Any]:
+    """Helper to attach options array and total votes to poll dict."""
+    p_id = poll["poll_id"]
+    async with conn.execute(
+        "SELECT * FROM poll_options WHERE poll_id = ? ORDER BY option_index ASC;",
+        (p_id,)
+    ) as opt_cursor:
+        opt_rows = await opt_cursor.fetchall()
+        poll["options"] = [dict(o) for o in opt_rows]
+
+    async with conn.execute(
+        "SELECT COUNT(*) as total FROM votes WHERE poll_id = ?;",
+        (p_id,)
+    ) as count_cursor:
+        cnt_row = await count_cursor.fetchone()
+        tot = cnt_row["total"] if cnt_row else 0
+        poll["total_votes"] = tot
+        poll["vote_count"] = tot
+
+    return poll
+
 async def create_poll(
     poll_id: str,
     creator_id: int,
@@ -297,24 +391,7 @@ async def get_poll(poll_id: str) -> Optional[Dict[str, Any]]:
             if not row:
                 return None
             poll = dict(row)
-            
-            # Fetch Options
-            async with conn.execute(
-                "SELECT * FROM poll_options WHERE poll_id = ? ORDER BY option_index ASC;",
-                (poll_id,)
-            ) as opt_cursor:
-                opt_rows = await opt_cursor.fetchall()
-                poll["options"] = [dict(o) for o in opt_rows]
-
-            # Fetch Vote Count Total
-            async with conn.execute(
-                "SELECT COUNT(*) as total FROM votes WHERE poll_id = ?;",
-                (poll_id,)
-            ) as count_cursor:
-                cnt_row = await count_cursor.fetchone()
-                poll["total_votes"] = cnt_row["total"] if cnt_row else 0
-
-            return poll
+            return await _attach_poll_details(conn, poll)
 
 async def get_user_polls(user_id: int) -> List[Dict[str, Any]]:
     """Retrieves all polls created by a user."""
@@ -324,7 +401,12 @@ async def get_user_polls(user_id: int) -> List[Dict[str, Any]]:
             (user_id,)
         ) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
 async def get_active_polls() -> List[Dict[str, Any]]:
     """Retrieves all active public polls."""
@@ -333,7 +415,30 @@ async def get_active_polls() -> List[Dict[str, Any]]:
             "SELECT * FROM polls WHERE status = 'active' AND is_public = 1 ORDER BY created_at DESC;"
         ) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
+
+async def get_trending_polls(limit: int = 5, order_by: str = "votes") -> List[Dict[str, Any]]:
+    """Retrieves top public active polls ordered by votes, views, or date."""
+    async with await get_db_connection() as conn:
+        order_clause = "ORDER BY (SELECT COUNT(*) FROM votes WHERE poll_id = polls.poll_id) DESC"
+        if order_by == "views":
+            order_clause = "ORDER BY views DESC"
+        elif order_by in ("recent", "date", "newest"):
+            order_clause = "ORDER BY created_at DESC"
+
+        async with conn.execute(f"SELECT * FROM polls WHERE is_public = 1 AND status = 'active' {order_clause} LIMIT ?;", (limit,)) as cursor:
+            rows = await cursor.fetchall()
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
 async def get_expired_active_polls() -> List[Dict[str, Any]]:
     """Retrieves active polls that have passed their expiration timestamp."""
@@ -372,17 +477,22 @@ async def increment_poll_shares(poll_id: str):
         await conn.execute("UPDATE polls SET shares = shares + 1 WHERE poll_id = ?;", (poll_id,))
         await conn.commit()
 
-async def search_polls(query: str) -> List[Dict[str, Any]]:
+async def search_polls(query: str, field: str = "all", limit: int = 10) -> List[Dict[str, Any]]:
     """Searches public polls by title or description."""
     async with await get_db_connection() as conn:
         pattern = f"%{query}%"
         async with conn.execute("""
             SELECT * FROM polls
             WHERE is_public = 1 AND (title LIKE ? OR description LIKE ?)
-            ORDER BY created_at DESC LIMIT 20;
-        """, (pattern, pattern)) as cursor:
+            ORDER BY created_at DESC LIMIT ?;
+        """, (pattern, pattern, limit)) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
 
 # ================= VOTE OPERATIONS =================
@@ -438,15 +548,20 @@ async def cast_vote(poll_id: str, user_id: int, option_index: int) -> Tuple[bool
         await update_user_xp(user_id, 10)
         return True, "Vote recorded successfully!"
 
-async def get_user_vote(poll_id: str, user_id: int) -> Optional[int]:
-    """Returns the option_index the user voted for, or None."""
+async def get_user_vote(arg1: Any, arg2: Any) -> Optional[Dict[str, int]]:
+    """Returns dict {'option_index': idx} if user voted on poll, or None. Handles flexible parameter order."""
+    if isinstance(arg1, str):
+        poll_id, user_id = arg1, int(arg2)
+    else:
+        user_id, poll_id = int(arg1), str(arg2)
+
     async with await get_db_connection() as conn:
         async with conn.execute(
             "SELECT option_index FROM votes WHERE poll_id = ? AND user_id = ?;",
             (poll_id, user_id)
         ) as cursor:
             row = await cursor.fetchone()
-            return row["option_index"] if row else None
+            return {"option_index": row["option_index"]} if row else None
 
 
 # ================= FAVORITES OPERATIONS =================
@@ -467,8 +582,13 @@ async def remove_favorite(user_id: int, poll_id: str) -> bool:
         await conn.commit()
         return True
 
-async def is_favorite(user_id: int, poll_id: str) -> bool:
-    """Checks if a poll is in user's favorites."""
+async def is_favorite(arg1: Any, arg2: Any) -> bool:
+    """Checks if a poll is in user's favorites, supporting both (user_id, poll_id) and (poll_id, user_id)."""
+    if isinstance(arg1, str):
+        poll_id, user_id = arg1, int(arg2)
+    else:
+        user_id, poll_id = int(arg1), str(arg2)
+
     async with await get_db_connection() as conn:
         async with conn.execute(
             "SELECT 1 FROM favorites WHERE user_id = ? AND poll_id = ?;",
@@ -476,6 +596,15 @@ async def is_favorite(user_id: int, poll_id: str) -> bool:
         ) as cursor:
             row = await cursor.fetchone()
             return bool(row)
+
+async def toggle_favorite(user_id: int, poll_id: str) -> bool:
+    """Toggles favorite state for user on a poll. Returns True if now favorited, False if removed."""
+    if await is_favorite(user_id, poll_id):
+        await remove_favorite(user_id, poll_id)
+        return False
+    else:
+        await add_favorite(user_id, poll_id)
+        return True
 
 async def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
     """Gets all favorite polls for a user."""
@@ -487,22 +616,26 @@ async def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
             ORDER BY f.added_at DESC;
         """, (user_id,)) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
 
 # ================= FORCE JOIN & CHANNEL OPERATIONS =================
 
-async def add_force_join_channel(channel_id: int, channel_username: str, channel_title: str = "") -> bool:
-    """Adds or updates a required force join channel."""
+async def add_force_join_channel(channel_username: str, channel_title: str = "") -> bool:
+    """Adds or updates a required force join channel by username."""
     async with await get_db_connection() as conn:
         await conn.execute("""
-            INSERT INTO force_join_channels (channel_id, channel_username, channel_title, is_active)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(channel_id) DO UPDATE SET
-                channel_username = excluded.channel_username,
+            INSERT INTO force_join_channels (channel_username, channel_title, is_active)
+            VALUES (?, ?, 1)
+            ON CONFLICT(channel_username) DO UPDATE SET
                 channel_title = excluded.channel_title,
                 is_active = 1;
-        """, (channel_id, channel_username, channel_title))
+        """, (channel_username, channel_title or channel_username))
         await conn.commit()
         return True
 
@@ -525,14 +658,35 @@ async def get_force_join_channels() -> List[Dict[str, Any]]:
 
 # ================= LEADERBOARD & STATS =================
 
-async def get_leaderboard(limit: int = 10) -> List[Dict[str, Any]]:
-    """Retrieves top users by XP."""
+async def get_leaderboard(limit: int = 10, criteria: str = "xp") -> List[Dict[str, Any]]:
+    """Retrieves top users by XP, created polls, or votes cast."""
     async with await get_db_connection() as conn:
-        async with conn.execute("""
-            SELECT user_id, username, full_name, xp, level, rank
-            FROM users
-            ORDER BY xp DESC LIMIT ?;
-        """, (limit,)) as cursor:
+        if criteria in ("creators", "creator"):
+            query = """
+                SELECT u.user_id, u.username, u.full_name, u.level, u.rank,
+                       COUNT(p.poll_id) as metric_val, u.xp
+                FROM users u
+                LEFT JOIN polls p ON u.user_id = p.creator_id
+                GROUP BY u.user_id
+                ORDER BY metric_val DESC, u.xp DESC LIMIT ?;
+            """
+        elif criteria in ("voters", "voter", "votes"):
+            query = """
+                SELECT u.user_id, u.username, u.full_name, u.level, u.rank,
+                       COUNT(v.vote_id) as metric_val, u.xp
+                FROM users u
+                LEFT JOIN votes v ON u.user_id = v.user_id
+                GROUP BY u.user_id
+                ORDER BY metric_val DESC, u.xp DESC LIMIT ?;
+            """
+        else:
+            query = """
+                SELECT u.user_id, u.username, u.full_name, u.xp as metric_val, u.level, u.rank, u.xp
+                FROM users u
+                ORDER BY u.xp DESC LIMIT ?;
+            """
+
+        async with conn.execute(query, (limit,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
