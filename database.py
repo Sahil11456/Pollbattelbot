@@ -1,39 +1,36 @@
-import os
-import json
-import logging
 import aiosqlite
-from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Any
-
-from config import DATABASE_PATH
+import logging
+from typing import Optional, List, Dict, Any
+from config import DATABASE_PATH, ADMIN_IDS
 
 logger = logging.getLogger("bot.database")
 
-@asynccontextmanager
-async def get_db_connection():
-    """Yields an active aiosqlite connection with foreign keys enabled."""
-    async with aiosqlite.connect(DATABASE_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA foreign_keys = ON;")
-        await conn.execute("PRAGMA journal_mode = WAL;")
-        await conn.execute("PRAGMA synchronous = NORMAL;")
-        yield conn
+def get_db_connection():
+    """Returns an async context manager connection to SQLite database."""
+    conn = aiosqlite.connect(DATABASE_PATH)
+    conn.row_factory = aiosqlite.Row
+    return conn
 
 async def init_db():
-    """Initializes the database schema with all required tables, indices, and constraints."""
+    """Initializes SQLite database schemas, tables, and default settings."""
     async with get_db_connection() as conn:
+        await conn.execute("PRAGMA foreign_keys = ON;")
+        await conn.execute("PRAGMA journal_mode = WAL;")
+
         # 1. Users Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            first_name TEXT,
+            full_name TEXT,
+            role TEXT DEFAULT 'user',
             xp INTEGER DEFAULT 0,
             level INTEGER DEFAULT 1,
-            role TEXT DEFAULT 'user',
+            rank TEXT DEFAULT '🌱 Novice',
             is_banned INTEGER DEFAULT 0,
-            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            registration_date TEXT DEFAULT CURRENT_TIMESTAMP,
+            notifications_enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
@@ -44,133 +41,276 @@ async def init_db():
             creator_id INTEGER NOT NULL,
             title TEXT NOT NULL,
             description TEXT,
-            options TEXT NOT NULL, -- JSON String
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP,
-            is_closed INTEGER DEFAULT 0,
-            channel_id INTEGER,
+            status TEXT DEFAULT 'active',
             is_anonymous INTEGER DEFAULT 0,
-            FOREIGN KEY (creator_id) REFERENCES users(user_id) ON DELETE CASCADE
+            is_public INTEGER DEFAULT 1,
+            is_featured INTEGER DEFAULT 0,
+            poll_type TEXT DEFAULT 'regular',
+            quiz_correct_option INTEGER DEFAULT -1,
+            allow_revote INTEGER DEFAULT 1,
+            hide_results_until_closed INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT,
+            closed_at TEXT,
+            views INTEGER DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            duration_seconds INTEGER DEFAULT 86400,
+            category TEXT DEFAULT 'General',
+            pin_code TEXT,
+            win_announcement_sent INTEGER DEFAULT 0,
+            FOREIGN KEY (creator_id) REFERENCES users (user_id) ON DELETE CASCADE
         );
         """)
 
-        # 3. Votes Table
+        # 3. Options Table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS options (
+            option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id TEXT NOT NULL,
+            option_index INTEGER NOT NULL,
+            option_text TEXT NOT NULL,
+            vote_count INTEGER DEFAULT 0,
+            FOREIGN KEY (poll_id) REFERENCES polls (poll_id) ON DELETE CASCADE,
+            UNIQUE(poll_id, option_index)
+        );
+        """)
+
+        # 4. Votes Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS votes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vote_id INTEGER PRIMARY KEY AUTOINCREMENT,
             poll_id TEXT NOT NULL,
             user_id INTEGER NOT NULL,
             option_index INTEGER NOT NULL,
-            voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(poll_id, user_id),
-            FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            device_token TEXT,
+            voted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (poll_id) REFERENCES polls (poll_id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+            UNIQUE(poll_id, user_id)
         );
         """)
 
-        # 4. Favorites Table
+        # 5. Channel Subscriptions Table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_subscriptions (
+            channel_id INTEGER PRIMARY KEY,
+            channel_username TEXT NOT NULL UNIQUE,
+            channel_title TEXT,
+            members_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # 6. Force Join Channels Table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS force_join_channels (
+            channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_username TEXT NOT NULL UNIQUE,
+            channel_title TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # 7. Favorites Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS favorites (
             user_id INTEGER NOT NULL,
             poll_id TEXT NOT NULL,
-            saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, poll_id),
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE
+            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+            FOREIGN KEY (poll_id) REFERENCES polls (poll_id) ON DELETE CASCADE
         );
         """)
 
-        # 5. Required Channels Table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS required_channels (
-            channel_id INTEGER PRIMARY KEY,
-            title TEXT,
-            invite_link TEXT NOT NULL
-        );
-        """)
-
-        # 6. Banned Users Table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS banned_users (
-            user_id INTEGER PRIMARY KEY,
-            reason TEXT,
-            banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-
-        # 7. System Settings Table
+        # 8. Settings Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
-        # Default maintenance mode setting
+        # 9. Winner History Table
         await conn.execute("""
-        INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance_mode', 'off');
+        CREATE TABLE IF NOT EXISTS winner_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id TEXT NOT NULL,
+            winner_option TEXT NOT NULL,
+            total_votes_won INTEGER DEFAULT 0,
+            announced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (poll_id) REFERENCES polls (poll_id) ON DELETE CASCADE
+        );
         """)
 
-        # Speed Optimization Indices
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_poll ON votes(poll_id);")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_user ON votes(user_id);")
+        # 10. System Logs Table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level TEXT NOT NULL,
+            message TEXT NOT NULL,
+            user_id INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # Indexes
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_creator ON polls(creator_id);")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_expires ON polls(expires_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_status ON polls(status);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_poll_user ON votes(poll_id, user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);")
+
+        # Initial Default Settings
+        default_settings = [
+            ('maintenance_mode', 'False'),
+            ('custom_footer', 'Powered by Poll Battle Bot'),
+            ('auto_post_polls', 'True'),
+            ('winner_announcements', 'True')
+        ]
+        for key, val in default_settings:
+            await conn.execute("""
+                INSERT OR IGNORE INTO settings (setting_key, setting_value)
+                VALUES (?, ?);
+            """, (key, val))
 
         await conn.commit()
-        logger.info("SQLite Database initialized successfully with indices and foreign keys!")
+        logger.info("Database initialized successfully.")
 
-async def register_user(user_id: INTEGER, username: Optional[str], first_name: Optional[str]) -> bool:
-    """Registers user if not existing, or updates existing metadata."""
+
+# ================= USER OPERATIONS =================
+
+async def register_user(user_id: int, username: str, full_name: str, role: str = 'user') -> Dict[str, Any]:
+    """Registers or updates a user in the database."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        exists = await cursor.fetchone()
-        if not exists:
-            await conn.execute(
-                "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-                (user_id, username, first_name)
-            )
-            await conn.commit()
-            return True
-        else:
-            await conn.execute(
-                "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
-                (username, first_name, user_id)
-            )
-            await conn.commit()
-            return False
+        await conn.execute("""
+            INSERT INTO users (user_id, username, full_name, role)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                full_name = excluded.full_name;
+        """, (user_id, username, full_name, role))
+        await conn.commit()
+        return await get_user(user_id)
 
 async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
-    """Retrieves user profile row."""
+    """Retrieves a single user by user_id."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return dict(row) if row else None
+        async with conn.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
 
-async def add_xp(user_id: int, xp_amount: int) -> Tuple[int, int, bool]:
-    """
-    Adds XP to user and calculates level up.
-    Returns: (new_xp, new_level, leveled_up)
-    """
+async def get_or_create_user(user_id: int, username: str = "Anonymous", full_name: str = "Anonymous User") -> Dict[str, Any]:
+    """Retrieves an existing user or creates a new user record with appropriate admin role."""
+    user = await get_user(user_id)
+    if user:
+        if (user.get("username") != username or user.get("full_name") != full_name) and username and full_name:
+            async with get_db_connection() as conn:
+                await conn.execute(
+                    "UPDATE users SET username = ?, full_name = ? WHERE user_id = ?;",
+                    (username, full_name, user_id)
+                )
+                await conn.commit()
+                user["username"] = username
+                user["full_name"] = full_name
+        return user
+
+    role = "user"
+    if user_id in ADMIN_IDS:
+        role = "admin"
+    else:
+        all_users = await get_all_users()
+        if not all_users:
+            role = "admin"
+
+    return await register_user(user_id, username or "Anonymous", full_name or "Anonymous User", role)
+
+async def get_user_polls_count(user_id: int) -> int:
+    """Returns count of polls created by user."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT xp, level FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        if not row:
-            return 0, 1, False
+        async with conn.execute("SELECT COUNT(*) as cnt FROM polls WHERE creator_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row["cnt"] if row else 0
 
-        curr_xp = row["xp"] + xp_amount
-        curr_lvl = row["level"]
+async def get_user_votes_count(user_id: int) -> int:
+    """Returns count of votes cast by user."""
+    async with get_db_connection() as conn:
+        async with conn.execute("SELECT COUNT(*) as cnt FROM votes WHERE user_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row["cnt"] if row else 0
 
-        # Level formula: Every 100 XP grants 1 Level
-        new_lvl = (curr_xp // 100) + 1
-        leveled_up = new_lvl > curr_lvl
+async def get_user_achievements(user_id: int) -> List[Dict[str, Any]]:
+    """Returns unlocked achievement milestones for a user."""
+    polls_cnt = await get_user_polls_count(user_id)
+    votes_cnt = await get_user_votes_count(user_id)
 
-        await conn.execute(
-            "UPDATE users SET xp = ?, level = ? WHERE user_id = ?",
-            (curr_xp, new_lvl, user_id)
-        )
+    unlocked = []
+    if votes_cnt >= 1:
+        unlocked.append({"achievement_name": "🗳️ First Vote Cast", "description": "Cast your first vote in the Arena"})
+    if votes_cnt >= 10:
+        unlocked.append({"achievement_name": "⭐ Active Voter", "description": "Cast 10 votes"})
+    if votes_cnt >= 50:
+        unlocked.append({"achievement_name": "🔥 Master Voter", "description": "Cast 50 votes"})
+    if polls_cnt >= 1:
+        unlocked.append({"achievement_name": "📝 Creator Spark", "description": "Created your first poll"})
+    if polls_cnt >= 5:
+        unlocked.append({"achievement_name": "🏆 Master Creator", "description": "Created 5 polls"})
+
+    return unlocked
+
+async def update_user_xp(user_id: int, xp_to_add: int) -> Dict[str, Any]:
+    """Adds XP to user and calculates level/rank up."""
+    from utils.helpers import calculate_level_and_xp, get_rank_by_level
+    user = await get_user(user_id)
+    if not user:
+        return {}
+
+    new_xp = user.get("xp", 0) + xp_to_add
+    new_level, _, _ = calculate_level_and_xp(new_xp)
+    new_rank = get_rank_by_level(new_level)
+
+    async with get_db_connection() as conn:
+        await conn.execute("""
+            UPDATE users
+            SET xp = ?, level = ?, rank = ?
+            WHERE user_id = ?;
+        """, (new_xp, new_level, new_rank, user_id))
         await conn.commit()
-        return curr_xp, new_lvl, leveled_up
+
+    user["xp"] = new_xp
+    user["level"] = new_level
+    user["rank"] = new_rank
+    return user
+
+async def is_user_banned(user_id: int) -> bool:
+    """Checks if a user is currently banned."""
+    user = await get_user(user_id)
+    return bool(user and user.get("is_banned", 0) == 1)
+
+async def ban_user(user_id: int) -> bool:
+    """Bans a target user."""
+    async with get_db_connection() as conn:
+        await conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?;", (user_id,))
+        await conn.commit()
+        return True
+
+async def unban_user(user_id: int) -> bool:
+    """Unbans a target user."""
+    async with get_db_connection() as conn:
+        await conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?;", (user_id,))
+        await conn.commit()
+        return True
+
+async def get_all_users() -> List[Dict[str, Any]]:
+    """Retrieves all registered users."""
+    async with get_db_connection() as conn:
+        async with conn.execute("SELECT * FROM users ORDER BY created_at DESC;") as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+# ================= POLL OPERATIONS =================
 
 async def create_poll(
     poll_id: str,
@@ -178,377 +318,384 @@ async def create_poll(
     title: str,
     description: str,
     options: List[str],
-    expires_at: Optional[datetime] = None,
-    channel_id: Optional[int] = None,
-    is_anonymous: bool = False
-) -> bool:
-    """Inserts a new poll record into SQLite database."""
-    options_json = json.dumps(options)
+    category: str = "General",
+    duration_seconds: int = 86400,
+    is_anonymous: bool = False,
+    is_public: bool = True,
+    poll_type: str = "regular",
+    quiz_correct_option: int = -1,
+    allow_revote: bool = True,
+    pin_code: Optional[str] = None
+) -> Dict[str, Any]:
+    """Creates a new poll record with option entries."""
+    from datetime import datetime, timedelta, timezone
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)).isoformat()
+
     async with get_db_connection() as conn:
-        await conn.execute(
-            """
-            INSERT INTO polls (poll_id, creator_id, title, description, options, expires_at, channel_id, is_anonymous)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                poll_id,
-                creator_id,
-                title,
-                description,
-                options_json,
-                expires_at.strftime("%Y-%m-%d %H:%M:%S") if expires_at else None,
-                channel_id,
-                1 if is_anonymous else 0
-            )
-        )
+        await conn.execute("""
+            INSERT INTO polls (
+                poll_id, creator_id, title, description, category,
+                duration_seconds, expires_at, is_anonymous, is_public,
+                poll_type, quiz_correct_option, allow_revote, pin_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            poll_id, creator_id, title, description, category,
+            duration_seconds, expires_at, int(is_anonymous), int(is_public),
+            poll_type, quiz_correct_option, int(allow_revote), pin_code
+        ))
+
+        for idx, opt_text in enumerate(options):
+            await conn.execute("""
+                INSERT INTO options (poll_id, option_index, option_text, vote_count)
+                VALUES (?, ?, ?, 0);
+            """, (poll_id, idx, opt_text))
+
         await conn.commit()
-        return True
+
+    await update_user_xp(creator_id, 20)
+    return await get_poll(poll_id)
 
 async def get_poll(poll_id: str) -> Optional[Dict[str, Any]]:
-    """Fetches single poll details by ID."""
+    """Retrieves poll details including options and vote counts."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT * FROM polls WHERE poll_id = ?", (poll_id,))
-        row = await cursor.fetchone()
-        if not row:
-            return None
-        poll = dict(row)
-        poll["options"] = json.loads(poll["options"])
-        return poll
+        async with conn.execute("SELECT * FROM polls WHERE poll_id = ?;", (poll_id,)) as cursor:
+            poll_row = await cursor.fetchone()
+            if not poll_row:
+                return None
 
-async def cast_vote(poll_id: str, user_id: int, option_index: int) -> Tuple[bool, str]:
-    """
-    Casts or updates vote for user in poll.
-    Enforces expiration, closed state, and UNIQUE constraints.
-    """
+            poll_dict = dict(poll_row)
+            return await _attach_poll_details(conn, poll_dict)
+
+async def _attach_poll_details(conn, poll_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Helper method to attach options and total vote count to a poll dict."""
+    poll_id = poll_dict["poll_id"]
+    async with conn.execute("SELECT * FROM options WHERE poll_id = ? ORDER BY option_index ASC;", (poll_id,)) as opt_cursor:
+        opt_rows = await opt_cursor.fetchall()
+        options = [dict(r) for r in opt_rows]
+
+    async with conn.execute("SELECT SUM(vote_count) as total FROM options WHERE poll_id = ?;", (poll_id,)) as sum_cursor:
+        sum_row = await sum_cursor.fetchone()
+        total_votes = sum_row["total"] if sum_row and sum_row["total"] is not None else 0
+
+    poll_dict["options"] = options
+    poll_dict["total_votes"] = total_votes
+    return poll_dict
+
+async def increment_poll_view(poll_id: str):
+    """Increments view counter for a poll."""
     async with get_db_connection() as conn:
-        # Verify Poll status
-        cursor = await conn.execute("SELECT is_closed, expires_at FROM polls WHERE poll_id = ?", (poll_id,))
-        poll = await cursor.fetchone()
-        if not poll:
-            return False, "Poll not found!"
-        if poll["is_closed"] == 1:
-            return False, "This poll is closed!"
-        if poll["expires_at"]:
-            exp_time = datetime.strptime(poll["expires_at"], "%Y-%m-%d %H:%M:%S")
-            if datetime.now() > exp_time:
-                await conn.execute("UPDATE polls SET is_closed = 1 WHERE poll_id = ?", (poll_id,))
-                await conn.commit()
-                return False, "This poll has expired!"
+        await conn.execute("UPDATE polls SET views = views + 1 WHERE poll_id = ?;", (poll_id,))
+        await conn.commit()
 
-        # Check existing vote
-        cursor = await conn.execute("SELECT option_index FROM votes WHERE poll_id = ? AND user_id = ?", (poll_id, user_id))
-        existing_vote = await cursor.fetchone()
-
-        if existing_vote:
-            if existing_vote["option_index"] == option_index:
-                return False, "You have already voted for this option!"
-            # Update vote
-            await conn.execute(
-                "UPDATE votes SET option_index = ?, voted_at = CURRENT_TIMESTAMP WHERE poll_id = ? AND user_id = ?",
-                (option_index, poll_id, user_id)
-            )
-            await conn.commit()
-            return True, "Your vote has been updated!"
-        else:
-            # Insert new vote
-            await conn.execute(
-                "INSERT INTO votes (poll_id, user_id, option_index) VALUES (?, ?, ?)",
-                (poll_id, user_id, option_index)
-            )
-            await conn.commit()
-            return True, "Vote recorded successfully!"
-
-async def get_poll_results(poll_id: str) -> Dict[str, Any]:
-    """
-    Calculates total votes and option-wise distribution breakdown.
-    """
+async def get_user_polls(creator_id: int) -> List[Dict[str, Any]]:
+    """Gets all polls created by a specific user."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT options FROM polls WHERE poll_id = ?", (poll_id,))
-        row = await cursor.fetchone()
-        if not row:
-            return {"total_votes": 0, "breakdown": {}}
-
-        options = json.loads(row["options"])
-        cursor = await conn.execute(
-            "SELECT option_index, COUNT(*) as count FROM votes WHERE poll_id = ? GROUP BY option_index",
-            (poll_id,)
-        )
-        votes_data = await cursor.fetchall()
-
-        counts = {i: 0 for i in range(len(options))}
-        total_votes = 0
-        for v in votes_data:
-            idx = v["option_index"]
-            cnt = v["count"]
-            counts[idx] = cnt
-            total_votes += cnt
-
-        breakdown = []
-        for idx, opt in enumerate(options):
-            cnt = counts.get(idx, 0)
-            percentage = (cnt / total_votes * 100) if total_votes > 0 else 0.0
-            breakdown.append({
-                "index": idx,
-                "option": opt,
-                "votes": cnt,
-                "percentage": percentage
-            })
-
-        return {
-            "total_votes": total_votes,
-            "breakdown": breakdown
-        }
-
-async def get_user_voted_option(poll_id: str, user_id: int) -> Optional[int]:
-    """Returns option index user voted for, or None."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute(
-            "SELECT option_index FROM votes WHERE poll_id = ? AND user_id = ?",
-            (poll_id, user_id)
-        )
-        row = await cursor.fetchone()
-        return row["option_index"] if row else None
-
-async def toggle_favorite(user_id: int, poll_id: str) -> bool:
-    """Toggles favorite status for user poll. Returns True if saved, False if removed."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute(
-            "SELECT 1 FROM favorites WHERE user_id = ? AND poll_id = ?",
-            (user_id, poll_id)
-        )
-        exists = await cursor.fetchone()
-        if exists:
-            await conn.execute("DELETE FROM favorites WHERE user_id = ? AND poll_id = ?", (user_id, poll_id))
-            await conn.commit()
-            return False
-        else:
-            await conn.execute("INSERT INTO favorites (user_id, poll_id) VALUES (?, ?)", (user_id, poll_id))
-            await conn.commit()
-            return True
-
-async def is_favorite(user_id: int, poll_id: str) -> bool:
-    """Checks if poll is favorited by user."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT 1 FROM favorites WHERE user_id = ? AND poll_id = ?", (user_id, poll_id))
-        row = await cursor.fetchone()
-        return True if row else False
-
-async def get_user_polls(creator_id: int, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
-    """Retrieves polls created by specific user."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute(
-            "SELECT * FROM polls WHERE creator_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (creator_id, limit, offset)
-        )
-        rows = await cursor.fetchall()
-        polls = []
-        for r in rows:
-            p = dict(r)
-            p["options"] = json.loads(p["options"])
-            polls.append(p)
-        return polls
-
-async def get_favorite_polls(user_id: int, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
-    """Retrieves saved favorite polls of user."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute(
-            """
-            SELECT p.* FROM polls p
-            JOIN favorites f ON p.poll_id = f.poll_id
-            WHERE f.user_id = ?
-            ORDER BY f.saved_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (user_id, limit, offset)
-        )
-        rows = await cursor.fetchall()
-        polls = []
-        for r in rows:
-            p = dict(r)
-            p["options"] = json.loads(p["options"])
-            polls.append(p)
-        return polls
+        async with conn.execute("SELECT * FROM polls WHERE creator_id = ? ORDER BY created_at DESC;", (creator_id,)) as cursor:
+            rows = await cursor.fetchall()
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
 async def get_trending_polls(limit: int = 10) -> List[Dict[str, Any]]:
-    """Retrieves top active polls sorted by vote counts."""
+    """Fetches trending active public polls ordered by view and vote popularity."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute(
-            """
-            SELECT p.*, COUNT(v.id) as vote_count
+        async with conn.execute("""
+            SELECT p.*, (p.views + COALESCE((SELECT SUM(vote_count) FROM options WHERE poll_id = p.poll_id), 0) * 3) as score
             FROM polls p
-            LEFT JOIN votes v ON p.poll_id = v.poll_id
-            WHERE p.is_closed = 0
-            GROUP BY p.poll_id
-            ORDER BY vote_count DESC, p.created_at DESC
-            LIMIT ?
-            """,
-            (limit,)
-        )
-        rows = await cursor.fetchall()
-        polls = []
-        for r in rows:
-            p = dict(r)
-            p["options"] = json.loads(p["options"])
-            polls.append(p)
-        return polls
+            WHERE p.status = 'active' AND p.is_public = 1
+            ORDER BY score DESC, p.created_at DESC
+            LIMIT ?;
+        """, (limit,)) as cursor:
+            rows = await cursor.fetchall()
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
-async def search_polls(query_text: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Searches polls matching title or description query."""
+async def search_polls(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Searches public polls by title, description, or poll_id keyword."""
     async with get_db_connection() as conn:
-        pattern = f"%{query_text}%"
-        cursor = await conn.execute(
-            """
+        q = f"%{query}%"
+        async with conn.execute("""
             SELECT * FROM polls
-            WHERE (title LIKE ? OR description LIKE ?) AND is_closed = 0
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (pattern, pattern, limit)
-        )
-        rows = await cursor.fetchall()
-        polls = []
-        for r in rows:
-            p = dict(r)
-            p["options"] = json.loads(p["options"])
-            polls.append(p)
-        return polls
-
-async def get_leaderboard(limit: int = 10) -> List[Dict[str, Any]]:
-    """Fetches top XP users for leaderboard."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute(
-            "SELECT user_id, username, first_name, xp, level FROM users ORDER BY xp DESC LIMIT ?",
-            (limit,)
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+            WHERE (title LIKE ? OR description LIKE ? OR poll_id = ?) AND is_public = 1
+            ORDER BY created_at DESC LIMIT ?;
+        """, (q, q, query, limit)) as cursor:
+            rows = await cursor.fetchall()
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
 
 async def close_poll(poll_id: str) -> bool:
-    """Closes voting on specified poll."""
+    """Closes a poll from further voting."""
+    from datetime import datetime, timezone
+    closed_at = datetime.now(timezone.utc).isoformat()
     async with get_db_connection() as conn:
-        await conn.execute("UPDATE polls SET is_closed = 1 WHERE poll_id = ?", (poll_id,))
+        await conn.execute("""
+            UPDATE polls SET status = 'closed', closed_at = ? WHERE poll_id = ?;
+        """, (closed_at, poll_id))
         await conn.commit()
         return True
 
 async def delete_poll(poll_id: str) -> bool:
-    """Deletes poll and associated votes/favorites."""
+    """Deletes a poll permanently."""
     async with get_db_connection() as conn:
-        await conn.execute("DELETE FROM polls WHERE poll_id = ?", (poll_id,))
+        await conn.execute("DELETE FROM polls WHERE poll_id = ?;", (poll_id,))
         await conn.commit()
         return True
 
-async def add_required_channel(channel_id: int, title: str, invite_link: str) -> bool:
-    """Adds force-join requirement channel."""
+async def get_expired_active_polls() -> List[Dict[str, Any]]:
+    """Retrieves active polls whose expires_at timestamp has passed."""
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
     async with get_db_connection() as conn:
-        await conn.execute(
-            "INSERT OR REPLACE INTO required_channels (channel_id, title, invite_link) VALUES (?, ?, ?)",
-            (channel_id, title, invite_link)
-        )
+        async with conn.execute("""
+            SELECT * FROM polls
+            WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?;
+        """, (now_iso,)) as cursor:
+            rows = await cursor.fetchall()
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
+
+
+# ================= VOTE OPERATIONS =================
+
+async def record_vote(poll_id: str, user_id: int, option_index: int, device_token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Records a vote for a user on a given poll option with transaction safety.
+    Handles revoting if allowed.
+    """
+    poll_obj = await get_poll(poll_id)
+    if not poll_obj:
+        return {"success": False, "error": "Poll not found."}
+
+    if poll_obj.get("status") != "active":
+        return {"success": False, "error": "This poll is closed."}
+
+    async with get_db_connection() as conn:
+        # Check if user already voted
+        async with conn.execute("SELECT option_index FROM votes WHERE poll_id = ? AND user_id = ?;", (poll_id, user_id)) as cursor:
+            existing_vote = await cursor.fetchone()
+
+        if existing_vote:
+            if not poll_obj.get("allow_revote", 1):
+                return {"success": False, "error": "Revoting is disabled for this poll."}
+
+            old_option_index = existing_vote["option_index"]
+            if old_option_index == option_index:
+                return {"success": False, "error": "You already voted for this option!"}
+
+            # Decrement old option vote count
+            await conn.execute("""
+                UPDATE options SET vote_count = MAX(0, vote_count - 1)
+                WHERE poll_id = ? AND option_index = ?;
+            """, (poll_id, old_option_index))
+
+            # Update vote record
+            await conn.execute("""
+                UPDATE votes SET option_index = ?, device_token = ?, voted_at = CURRENT_TIMESTAMP
+                WHERE poll_id = ? AND user_id = ?;
+            """, (option_index, device_token, poll_id, user_id))
+        else:
+            # New Vote record
+            await conn.execute("""
+                INSERT INTO votes (poll_id, user_id, option_index, device_token)
+                VALUES (?, ?, ?, ?);
+            """, (poll_id, user_id, option_index, device_token))
+
+        # Increment new option vote count
+        await conn.execute("""
+            UPDATE options SET vote_count = vote_count + 1
+            WHERE poll_id = ? AND option_index = ?;
+        """, (poll_id, option_index))
+
+        await conn.commit()
+
+    # Reward voter with XP
+    await update_user_xp(user_id, 10)
+    updated_poll = await get_poll(poll_id)
+    return {"success": True, "poll": updated_poll}
+
+async def get_user_vote(poll_id: str, user_id: int) -> Optional[int]:
+    """Gets option index user voted for in a poll."""
+    async with get_db_connection() as conn:
+        async with conn.execute("SELECT option_index FROM votes WHERE poll_id = ? AND user_id = ?;", (poll_id, user_id)) as cursor:
+            row = await cursor.fetchone()
+            return row["option_index"] if row else None
+
+
+# ================= FAVORITES OPERATIONS =================
+
+async def add_favorite(user_id: int, poll_id: str) -> bool:
+    """Adds a poll to user's favorites list."""
+    async with get_db_connection() as conn:
+        await conn.execute("""
+            INSERT OR IGNORE INTO favorites (user_id, poll_id)
+            VALUES (?, ?);
+        """, (user_id, poll_id))
         await conn.commit()
         return True
 
-async def remove_required_channel(channel_id: int) -> bool:
-    """Removes force-join channel constraint."""
+async def remove_favorite(user_id: int, poll_id: str) -> bool:
+    """Removes a poll from user's favorites list."""
     async with get_db_connection() as conn:
-        await conn.execute("DELETE FROM required_channels WHERE channel_id = ?", (channel_id,))
+        await conn.execute("DELETE FROM favorites WHERE user_id = ? AND poll_id = ?;", (user_id, poll_id))
         await conn.commit()
         return True
 
-async def get_required_channels() -> List[Dict[str, Any]]:
-    """Gets list of all force-join channels."""
+async def is_favorite(user_id: int, poll_id: str) -> bool:
+    """Checks if a poll is favorited by user."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT * FROM required_channels")
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+        async with conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id = ? AND poll_id = ?;",
+            (user_id, poll_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return bool(row)
 
-async def ban_user(user_id: int, reason: str = "Violation of terms") -> bool:
-    """Bans user from bot interaction."""
+async def toggle_favorite(user_id: int, poll_id: str) -> bool:
+    """Toggles favorite state for user on a poll. Returns True if now favorited, False if removed."""
+    if await is_favorite(user_id, poll_id):
+        await remove_favorite(user_id, poll_id)
+        return False
+    else:
+        await add_favorite(user_id, poll_id)
+        return True
+
+async def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
+    """Gets all favorite polls for a user."""
     async with get_db_connection() as conn:
-        await conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
-        await conn.execute(
-            "INSERT OR REPLACE INTO banned_users (user_id, reason) VALUES (?, ?)",
-            (user_id, reason)
-        )
+        async with conn.execute("""
+            SELECT p.* FROM polls p
+            JOIN favorites f ON p.poll_id = f.poll_id
+            WHERE f.user_id = ?
+            ORDER BY f.added_at DESC;
+        """, (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            polls = []
+            for r in rows:
+                p_dict = dict(r)
+                p_dict = await _attach_poll_details(conn, p_dict)
+                polls.append(p_dict)
+            return polls
+
+
+# ================= FORCE JOIN & CHANNEL OPERATIONS =================
+
+async def add_force_join_channel(channel_username: str, channel_title: str = "") -> bool:
+    """Adds or updates a required force join channel by username."""
+    async with get_db_connection() as conn:
+        await conn.execute("""
+            INSERT INTO force_join_channels (channel_username, channel_title, is_active)
+            VALUES (?, ?, 1)
+            ON CONFLICT(channel_username) DO UPDATE SET
+                channel_title = excluded.channel_title,
+                is_active = 1;
+        """, (channel_username, channel_title or channel_username))
         await conn.commit()
         return True
 
-async def unban_user(user_id: int) -> bool:
-    """Unbans user from bot."""
+async def remove_force_join_channel(channel_id: int) -> bool:
+    """Deactivates/removes a force join channel."""
     async with get_db_connection() as conn:
-        await conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
-        await conn.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+        await conn.execute("DELETE FROM force_join_channels WHERE channel_id = ?;", (channel_id,))
         await conn.commit()
         return True
 
-async def is_user_banned(user_id: int) -> bool:
-    """Checks if user is banned."""
+async def get_force_join_channels() -> List[Dict[str, Any]]:
+    """Retrieves all active force join channels."""
     async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return bool(row["is_banned"]) if row else False
+        async with conn.execute(
+            "SELECT * FROM force_join_channels WHERE is_active = 1;"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+# ================= LEADERBOARD & STATS =================
+
+async def get_leaderboard(limit: int = 10, criteria: str = "xp") -> List[Dict[str, Any]]:
+    """Retrieves top users by XP, created polls, or votes cast."""
+    async with get_db_connection() as conn:
+        if criteria in ("creators", "creator"):
+            query = """
+                SELECT u.user_id, u.username, u.full_name, u.level, u.rank,
+                       COUNT(p.poll_id) as metric_val, u.xp
+                FROM users u
+                LEFT JOIN polls p ON u.user_id = p.creator_id
+                GROUP BY u.user_id
+                ORDER BY metric_val DESC, u.xp DESC LIMIT ?;
+            """
+        elif criteria in ("voters", "voter", "votes"):
+            query = """
+                SELECT u.user_id, u.username, u.full_name, u.level, u.rank,
+                       COUNT(v.vote_id) as metric_val, u.xp
+                FROM users u
+                LEFT JOIN votes v ON u.user_id = v.user_id
+                GROUP BY u.user_id
+                ORDER BY metric_val DESC, u.xp DESC LIMIT ?;
+            """
+        else:
+            query = """
+                SELECT u.user_id, u.username, u.full_name, u.xp as metric_val, u.level, u.rank, u.xp
+                FROM users u
+                ORDER BY u.xp DESC LIMIT ?;
+            """
+
+        async with conn.execute(query, (limit,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
 
 async def get_system_stats() -> Dict[str, Any]:
-    """Compiles dashboard telemetry metrics."""
+    """Gathers overall system statistics for admin dashboard."""
     async with get_db_connection() as conn:
-        u_cur = await conn.execute("SELECT COUNT(*) as count FROM users")
-        total_users = (await u_cur.fetchone())["count"]
-
-        p_cur = await conn.execute("SELECT COUNT(*) as count FROM polls")
-        total_polls = (await p_cur.fetchone())["count"]
-
-        v_cur = await conn.execute("SELECT COUNT(*) as count FROM votes")
-        total_votes = (await v_cur.fetchone())["count"]
-
-        act_cur = await conn.execute("SELECT COUNT(*) as count FROM polls WHERE is_closed = 0")
-        active_polls = (await act_cur.fetchone())["count"]
+        async with conn.execute("SELECT COUNT(*) as cnt FROM users;") as c:
+            users_cnt = (await c.fetchone())["cnt"]
+        async with conn.execute("SELECT COUNT(*) as cnt FROM polls;") as c:
+            polls_cnt = (await c.fetchone())["cnt"]
+        async with conn.execute("SELECT COUNT(*) as cnt FROM votes;") as c:
+            votes_cnt = (await c.fetchone())["cnt"]
+        async with conn.execute("SELECT COUNT(*) as cnt FROM polls WHERE status = 'active';") as c:
+            active_cnt = (await c.fetchone())["cnt"]
 
         return {
-            "total_users": total_users,
-            "total_polls": total_polls,
-            "total_votes": total_votes,
-            "active_polls": active_polls
+            "total_users": users_cnt,
+            "total_polls": polls_cnt,
+            "total_votes": votes_cnt,
+            "active_polls": active_cnt
         }
 
-async def set_setting(key: str, value: str):
-    """Sets system configuration key/value."""
+
+# ================= SETTINGS OPERATIONS =================
+
+async def get_setting(key: str, default: str = "") -> str:
+    """Gets a global setting value."""
     async with get_db_connection() as conn:
-        await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        async with conn.execute("SELECT setting_value FROM settings WHERE setting_key = ?;", (key,)) as cursor:
+            row = await cursor.fetchone()
+            return row["setting_value"] if row else default
+
+async def set_setting(key: str, value: str) -> bool:
+    """Sets a global setting value."""
+    async with get_db_connection() as conn:
+        await conn.execute("""
+            INSERT INTO settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value,
+                updated_at = CURRENT_TIMESTAMP;
+        """, (key, value))
         await conn.commit()
-
-async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Gets system setting by key."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = await cursor.fetchone()
-        return row["value"] if row else default
-
-async def get_all_users() -> List[int]:
-    """Retrieves user IDs list for broadcasts."""
-    async with get_db_connection() as conn:
-        cursor = await conn.execute("SELECT user_id FROM users")
-        rows = await cursor.fetchall()
-        return [r["user_id"] for r in rows]
-
-async def check_and_close_expired_polls() -> List[Dict[str, Any]]:
-    """Checks and closes all expired polls, returning list of newly closed polls."""
-    async with get_db_connection() as conn:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor = await conn.execute(
-            "SELECT * FROM polls WHERE is_closed = 0 AND expires_at IS NOT NULL AND expires_at <= ?",
-            (now_str,)
-        )
-        expired_rows = await cursor.fetchall()
-        expired_polls = []
-        for r in expired_rows:
-            p = dict(r)
-            p["options"] = json.loads(p["options"])
-            expired_polls.append(p)
-
-        if expired_polls:
-            await conn.execute(
-                "UPDATE polls SET is_closed = 1 WHERE is_closed = 0 AND expires_at IS NOT NULL AND expires_at <= ?",
-                (now_str,)
-            )
-            await conn.commit()
-
-        return expired_polls
+        return True
