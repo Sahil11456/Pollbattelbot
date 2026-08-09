@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bot Credentials & Administration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8871940323:AAHlQU6eytIp3-KVaMWQhYes6T5dMEo6u5E")
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "5636959648").split(",") if x.strip().isdigit()]
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
 # Database Configuration
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_database.db")
@@ -29,6 +29,11 @@ MAX_OPTION_LENGTH = int(os.getenv("MAX_OPTION_LENGTH", "100"))
 
 # Automation & Scheduler Settings
 AUTO_CLOSE_CHECK_INTERVAL = int(os.getenv("AUTO_CLOSE_CHECK_INTERVAL", "60"))
+
+# Gamification & XP Settings
+XP_LEVEL_UP_BASE = int(os.getenv("XP_LEVEL_UP_BASE", "100"))
+XP_PER_VOTE = int(os.getenv("XP_PER_VOTE", "10"))
+XP_PER_POLL = int(os.getenv("XP_PER_POLL", "25"))
 
 # Bot Maintenance & System Defaults
 MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "false").lower() == "true"
